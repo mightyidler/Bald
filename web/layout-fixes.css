@@ -1,0 +1,13 @@
+html,
+body {
+  background: #000;
+}
+
+.app {
+  border: 0;
+  border-radius: 0;
+}
+
+.main {
+  padding-bottom: 16px;
+}

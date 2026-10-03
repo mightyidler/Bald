@@ -1,0 +1,54 @@
+@font-face {
+  font-family: PretendardUI;
+  src: url('figma/Pretendard-Regular.otf') format('opentype');
+  font-style: normal;
+  font-weight: 400;
+}
+
+@font-face {
+  font-family: PretendardUI;
+  src: url('figma/Pretendard-Medium.otf') format('opentype');
+  font-style: normal;
+  font-weight: 500;
+}
+
+@font-face {
+  font-family: PretendardUI;
+  src: url('figma/Pretendard-SemiBold.otf') format('opentype');
+  font-style: normal;
+  font-weight: 600;
+}
+
+@font-face {
+  font-family: PretendardUI;
+  src: url('figma/Pretendard-Bold.otf') format('opentype');
+  font-style: normal;
+  font-weight: 700;
+}
+
+html,
+body,
+button,
+input {
+  font-family: PretendardUI, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+}
+
+.app-row,
+.picker-row {
+  gap: 16px;
+}
+
+.picker-scroll-edge {
+  position: absolute;
+  z-index: 3;
+  top: 112px;
+  left: 0;
+  right: 0;
+  height: 40px;
+  pointer-events: none;
+  background: rgba(31, 31, 31, .76);
+  backdrop-filter: blur(20px);
+  -webkit-backdrop-filter: blur(20px);
+  -webkit-mask-image: linear-gradient(to bottom, #000 0%, rgba(0, 0, 0, .82) 48%, transparent 100%);
+  mask-image: linear-gradient(to bottom, #000 0%, rgba(0, 0, 0, .82) 48%, transparent 100%);
+}

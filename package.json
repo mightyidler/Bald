@@ -1,0 +1,19 @@
+{
+  "name": "bald",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "dev": "tauri dev",
+    "build": "node build-signed.js",
+    "build:unsigned": "tauri build",
+    "release": "node bump-and-push.js",
+    "tauri": "tauri"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "^2.0.0"
+  },
+  "dependencies": {
+    "@tauri-apps/api": "^2.0.0",
+    "@tauri-apps/plugin-updater": "^2.10.0"
+  }
+}

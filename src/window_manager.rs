@@ -1,0 +1,388 @@
+// Window-style behavior is derived from ihateborders (GPL-3.0),
+// https://github.com/Z1xus/ihateborders, Copyright its contributors.
+
+use std::{
+    collections::HashMap,
+    ffi::c_void,
+    sync::{Arc, Mutex},
+};
+
+use anyhow::{Result, bail};
+use windows::Win32::{
+    Foundation::{CloseHandle, HWND, LPARAM, POINT, RECT},
+    Graphics::Gdi::ClientToScreen,
+    System::Threading::{
+        OpenProcess, PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION,
+        QueryFullProcessImageNameW,
+    },
+    UI::WindowsAndMessaging::{
+        EnumWindows, GW_OWNER, GWL_EXSTYLE, GWL_STYLE, GetClassNameW, GetClientRect, GetWindow,
+        GetWindowLongW, GetWindowRect, GetWindowTextW, GetWindowThreadProcessId, IsWindow,
+        IsWindowVisible, SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOZORDER, SetWindowLongW,
+        SetWindowPos, WS_BORDER, WS_CAPTION, WS_DLGFRAME, WS_EX_TOOLWINDOW, WS_THICKFRAME,
+    },
+};
+
+pub struct ExecutableIcon {
+    pub width: u32,
+    pub height: u32,
+    pub rgba: Vec<u8>,
+}
+
+pub fn executable_icon(path: &str) -> Option<ExecutableIcon> {
+    high_resolution_executable_icon(path).or_else(|| legacy_executable_icon(path))
+}
+
+fn high_resolution_executable_icon(path: &str) -> Option<ExecutableIcon> {
+    use std::mem::size_of;
+    use windows::{
+        Win32::{
+            Foundation::SIZE,
+            Graphics::Gdi::{
+                BI_RGB, BITMAP, BITMAPINFO, BITMAPINFOHEADER, CreateCompatibleDC, DIB_RGB_COLORS,
+                DeleteDC, DeleteObject, GetDIBits, GetObjectW, HGDIOBJ,
+            },
+            System::Com::{COINIT_APARTMENTTHREADED, CoInitializeEx},
+            UI::Shell::{
+                IShellItemImageFactory, SHCreateItemFromParsingName, SIIGBF_BIGGERSIZEOK,
+                SIIGBF_ICONONLY,
+            },
+        },
+        core::PCWSTR,
+    };
+
+    let wide: Vec<u16> = path.encode_utf16().chain(Some(0)).collect();
+    unsafe {
+        let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
+        let factory: IShellItemImageFactory =
+            SHCreateItemFromParsingName(PCWSTR(wide.as_ptr()), None).ok()?;
+        let bitmap = factory
+            .GetImage(
+                SIZE { cx: 256, cy: 256 },
+                SIIGBF_ICONONLY | SIIGBF_BIGGERSIZEOK,
+            )
+            .ok()?;
+        let mut details = BITMAP::default();
+        if GetObjectW(
+            HGDIOBJ(bitmap.0),
+            size_of::<BITMAP>() as i32,
+            Some((&mut details as *mut BITMAP).cast()),
+        ) == 0
+        {
+            let _ = DeleteObject(HGDIOBJ(bitmap.0));
+            return None;
+        }
+        let width = details.bmWidth.max(1) as u32;
+        let height = details.bmHeight.max(1) as u32;
+        let mut info = BITMAPINFO::default();
+        info.bmiHeader = BITMAPINFOHEADER {
+            biSize: size_of::<BITMAPINFOHEADER>() as u32,
+            biWidth: width as i32,
+            biHeight: -(height as i32),
+            biPlanes: 1,
+            biBitCount: 32,
+            biCompression: BI_RGB.0,
+            ..Default::default()
+        };
+        let dc = CreateCompatibleDC(None);
+        if dc.0.is_null() {
+            let _ = DeleteObject(HGDIOBJ(bitmap.0));
+            return None;
+        }
+        let mut rgba = vec![0u8; (width * height * 4) as usize];
+        let lines = GetDIBits(
+            dc,
+            bitmap,
+            0,
+            height,
+            Some(rgba.as_mut_ptr().cast()),
+            &mut info,
+            DIB_RGB_COLORS,
+        );
+        let _ = DeleteDC(dc);
+        let _ = DeleteObject(HGDIOBJ(bitmap.0));
+        if lines == 0 {
+            return None;
+        }
+        for pixel in rgba.chunks_exact_mut(4) {
+            pixel.swap(0, 2);
+        }
+        Some(ExecutableIcon {
+            width,
+            height,
+            rgba,
+        })
+    }
+}
+
+fn legacy_executable_icon(path: &str) -> Option<ExecutableIcon> {
+    use std::{ffi::c_void, mem::size_of, ptr::copy_nonoverlapping};
+    use windows::{
+        Win32::{
+            Graphics::Gdi::{
+                BI_RGB, BITMAPINFO, BITMAPINFOHEADER, CreateCompatibleDC, CreateDIBSection,
+                DIB_RGB_COLORS, DeleteDC, DeleteObject, HGDIOBJ, SelectObject,
+            },
+            UI::{
+                Shell::{SHFILEINFOW, SHGFI_ICON, SHGFI_LARGEICON, SHGetFileInfoW},
+                WindowsAndMessaging::{DI_NORMAL, DestroyIcon, DrawIconEx},
+            },
+        },
+        core::PCWSTR,
+    };
+
+    const SIZE: i32 = 32;
+    let wide: Vec<u16> = path.encode_utf16().chain(Some(0)).collect();
+    let mut info = SHFILEINFOW::default();
+    let found = unsafe {
+        SHGetFileInfoW(
+            PCWSTR(wide.as_ptr()),
+            Default::default(),
+            Some(&mut info),
+            size_of::<SHFILEINFOW>() as u32,
+            SHGFI_ICON | SHGFI_LARGEICON,
+        )
+    };
+    if found == 0 || info.hIcon.0.is_null() {
+        return None;
+    }
+
+    let result = unsafe {
+        let dc = CreateCompatibleDC(None);
+        if dc.0.is_null() {
+            let _ = DestroyIcon(info.hIcon);
+            return None;
+        }
+        let mut bitmap_info = BITMAPINFO::default();
+        bitmap_info.bmiHeader = BITMAPINFOHEADER {
+            biSize: size_of::<BITMAPINFOHEADER>() as u32,
+            biWidth: SIZE,
+            biHeight: -SIZE,
+            biPlanes: 1,
+            biBitCount: 32,
+            biCompression: BI_RGB.0,
+            ..Default::default()
+        };
+        let mut bits: *mut c_void = std::ptr::null_mut();
+        let bitmap = CreateDIBSection(Some(dc), &bitmap_info, DIB_RGB_COLORS, &mut bits, None, 0);
+        let Ok(bitmap) = bitmap else {
+            let _ = DeleteDC(dc);
+            let _ = DestroyIcon(info.hIcon);
+            return None;
+        };
+        let old = SelectObject(dc, HGDIOBJ(bitmap.0));
+        let drawn = DrawIconEx(dc, 0, 0, info.hIcon, SIZE, SIZE, 0, None, DI_NORMAL).is_ok();
+        let mut bgra = vec![0u8; (SIZE * SIZE * 4) as usize];
+        if drawn && !bits.is_null() {
+            copy_nonoverlapping(bits.cast::<u8>(), bgra.as_mut_ptr(), bgra.len());
+        }
+        SelectObject(dc, old);
+        let _ = DeleteObject(HGDIOBJ(bitmap.0));
+        let _ = DeleteDC(dc);
+        let _ = DestroyIcon(info.hIcon);
+        drawn.then(|| {
+            for pixel in bgra.chunks_exact_mut(4) {
+                pixel.swap(0, 2);
+                if pixel[3] == 0 && (pixel[0] != 0 || pixel[1] != 0 || pixel[2] != 0) {
+                    pixel[3] = 255;
+                }
+            }
+            ExecutableIcon {
+                width: SIZE as u32,
+                height: SIZE as u32,
+                rgba: bgra,
+            }
+        })
+    };
+    result
+}
+
+const BORDER_STYLES: u32 = WS_BORDER.0 | WS_CAPTION.0 | WS_THICKFRAME.0 | WS_DLGFRAME.0;
+
+#[derive(Debug, Clone)]
+pub struct WindowInfo {
+    pub hwnd: isize,
+    pub title: String,
+    pub executable_name: String,
+    pub executable_path: Option<String>,
+    pub class_name: String,
+    pub is_borderless: bool,
+}
+
+#[derive(Clone, Default)]
+pub struct WindowController {
+    original_windows: Arc<Mutex<HashMap<isize, OriginalWindowState>>>,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct OriginalWindowState {
+    style: i32,
+    rect: RECT,
+}
+
+impl WindowController {
+    pub fn make_borderless(&self, hwnd_value: isize) -> Result<bool> {
+        let hwnd = HWND(hwnd_value as *mut c_void);
+        unsafe {
+            if !IsWindow(Some(hwnd)).as_bool() {
+                bail!("window no longer exists");
+            }
+            let current = GetWindowLongW(hwnd, GWL_STYLE);
+            if current as u32 & BORDER_STYLES == 0 {
+                return Ok(false);
+            }
+
+            // Keep the existing client area stable in screen coordinates. Some games cache
+            // their render/input surface and otherwise end up drawing into the former caption
+            // area while still hit-testing against the old client origin.
+            let mut window_rect = RECT::default();
+            GetWindowRect(hwnd, &mut window_rect)?;
+            let mut client_rect = RECT::default();
+            GetClientRect(hwnd, &mut client_rect)?;
+            let mut client_origin = POINT {
+                x: client_rect.left,
+                y: client_rect.top,
+            };
+            ClientToScreen(hwnd, &mut client_origin).ok()?;
+            let client_width = client_rect.right - client_rect.left;
+            let client_height = client_rect.bottom - client_rect.top;
+
+            self.original_windows
+                .lock()
+                .unwrap()
+                .entry(hwnd_value)
+                .or_insert(OriginalWindowState {
+                    style: current,
+                    rect: window_rect,
+                });
+            SetWindowLongW(hwnd, GWL_STYLE, (current as u32 & !BORDER_STYLES) as i32);
+            SetWindowPos(
+                hwnd,
+                None,
+                client_origin.x,
+                client_origin.y,
+                client_width,
+                client_height,
+                SWP_FRAMECHANGED | SWP_NOZORDER | SWP_NOACTIVATE,
+            )?;
+            Ok(true)
+        }
+    }
+
+    pub fn restore_borders(&self, hwnd_value: isize) -> Result<bool> {
+        let Some(original) = self
+            .original_windows
+            .lock()
+            .unwrap()
+            .get(&hwnd_value)
+            .copied()
+        else {
+            return Ok(false);
+        };
+        let hwnd = HWND(hwnd_value as *mut c_void);
+        unsafe {
+            if !IsWindow(Some(hwnd)).as_bool() {
+                bail!("window no longer exists");
+            }
+            SetWindowLongW(hwnd, GWL_STYLE, original.style);
+            SetWindowPos(
+                hwnd,
+                None,
+                original.rect.left,
+                original.rect.top,
+                original.rect.right - original.rect.left,
+                original.rect.bottom - original.rect.top,
+                SWP_FRAMECHANGED | SWP_NOZORDER | SWP_NOACTIVATE,
+            )?;
+            self.original_windows.lock().unwrap().remove(&hwnd_value);
+        }
+        Ok(true)
+    }
+}
+
+pub fn enumerate_windows() -> Vec<WindowInfo> {
+    let mut windows: Vec<WindowInfo> = Vec::new();
+    unsafe {
+        let _ = EnumWindows(Some(enum_window), LPARAM(&mut windows as *mut _ as isize));
+    }
+    windows.sort_by_key(|window| window.title.to_lowercase());
+    windows
+}
+
+unsafe extern "system" fn enum_window(hwnd: HWND, lparam: LPARAM) -> windows::core::BOOL {
+    unsafe {
+        if !IsWindowVisible(hwnd).as_bool()
+            || GetWindow(hwnd, GW_OWNER)
+                .ok()
+                .is_some_and(|owner| !owner.0.is_null())
+            || GetWindowLongW(hwnd, GWL_EXSTYLE) as u32 & WS_EX_TOOLWINDOW.0 != 0
+        {
+            return true.into();
+        }
+        let mut title = [0u16; 512];
+        let title_len = GetWindowTextW(hwnd, &mut title);
+        if title_len <= 0 {
+            return true.into();
+        }
+        let title = String::from_utf16_lossy(&title[..title_len as usize]);
+        if title.trim().is_empty() || title == "Program Manager" || title == "Bald" {
+            return true.into();
+        }
+        let mut pid = 0;
+        GetWindowThreadProcessId(hwnd, Some(&mut pid));
+        let path = process_path(pid);
+        let executable_name = path
+            .as_ref()
+            .and_then(|path| std::path::Path::new(path).file_name())
+            .and_then(|name| name.to_str())
+            .unwrap_or("Unknown")
+            .to_owned();
+        if executable_name.eq_ignore_ascii_case("bald.exe") {
+            return true.into();
+        }
+        let mut class = [0u16; 256];
+        let class_len = GetClassNameW(hwnd, &mut class);
+        let class_name = String::from_utf16_lossy(&class[..class_len.max(0) as usize]);
+        let style = GetWindowLongW(hwnd, GWL_STYLE) as u32;
+        let output = &mut *(lparam.0 as *mut Vec<WindowInfo>);
+        output.push(WindowInfo {
+            hwnd: hwnd.0 as isize,
+            title,
+            executable_name,
+            executable_path: path,
+            class_name,
+            is_borderless: style & BORDER_STYLES == 0,
+        });
+        true.into()
+    }
+}
+
+fn process_path(pid: u32) -> Option<String> {
+    unsafe {
+        let process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid).ok()?;
+        let mut buffer = vec![0u16; 32768];
+        let mut len = buffer.len() as u32;
+        let result = QueryFullProcessImageNameW(
+            process,
+            PROCESS_NAME_WIN32,
+            windows::core::PWSTR(buffer.as_mut_ptr()),
+            &mut len,
+        );
+        let _ = CloseHandle(process);
+        result.ok()?;
+        Some(String::from_utf16_lossy(&buffer[..len as usize]))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn extracts_a_renderable_executable_icon() {
+        let path = std::env::current_exe().unwrap();
+        let icon = executable_icon(path.to_str().unwrap()).expect("executable icon");
+        assert!(icon.width >= 32);
+        assert_eq!(icon.rgba.len(), (icon.width * icon.height * 4) as usize);
+    }
+}

@@ -1,0 +1,6 @@
+/target/
+/node_modules/
+/.reference/
+*.log
+.env
+updater.key
