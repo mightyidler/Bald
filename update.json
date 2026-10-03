@@ -1,11 +1,11 @@
 {
   "version": "0.1.0",
-  "notes": "Bald 0.1.0",
-  "pub_date": "2026-10-04T00:00:00Z",
+  "notes": "Bald 0.1.0 업데이트",
+  "pub_date": "2026-10-03T21:52:53.280Z",
   "platforms": {
     "windows-x86_64": {
-      "signature": "INITIAL_RELEASE_HAS_NO_UPDATE_SIGNATURE",
-      "url": "https://github.com/mightyidler/Bald/releases"
+      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVSZEx5bXNwVFR4ZmhoTjFSMHBwa0FYenptWkNLUXpaVnJwbTZEWmZYdzRSWERmdFEwczdIWEVvWmhHS0xzZUxBUUExNFBVbXRVYytubWg2Vy9EN1QrNEdiRXB2K2lrNUFrPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzkxMDY0MzcwCWZpbGU6QmFsZF8wLjEuMF94NjQtc2V0dXAuZXhlCXZlcnNpb246MC4xLjAKVmdDbHZzOG40dy91cHpldDkrN2dLdXhCc3NYVEdhZWYvbGtLL0RKQzVnMnF3bVJMbzBsNytIZ1JjSkR4UXpzajZVMDdzaEVFQWNPczBCZGIrREh0Q3c9PQo=",
+      "url": "https://github.com/mightyidler/Bald/releases/download/v0.1.0/Bald_0.1.0_x64-setup.exe"
     }
   }
 }
