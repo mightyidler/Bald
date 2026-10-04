@@ -139,6 +139,15 @@ fn persist(state: &AppState) -> Result<(), String> {
     Ok(())
 }
 
+fn restore_rule_windows(rule: &ApplicationRule, state: &AppState) {
+    for window in enumerate_windows()
+        .iter()
+        .filter(|window| rule.matches(window))
+    {
+        let _ = state.controller.restore_borders(window.hwnd);
+    }
+}
+
 #[tauri::command]
 fn add_application(choice: WindowChoice, state: State<'_, AppState>) -> Result<(), String> {
     let window = enumerate_windows()
@@ -172,27 +181,30 @@ fn remove_application(id: String, state: State<'_, AppState>) -> Result<(), Stri
         .iter()
         .find(|rule| rule.id == id)
         .cloned();
-    if let Some(rule) = rule {
-        for window in enumerate_windows()
-            .iter()
-            .filter(|window| rule.matches(window))
-        {
-            let _ = state.controller.restore_borders(window.hwnd);
-        }
-    }
     state
         .config
         .write()
         .unwrap()
         .applications
         .retain(|rule| rule.id != id);
-    persist(&state)
+    persist(&state)?;
+    if let Some(rule) = rule {
+        restore_rule_windows(&rule, &state);
+    }
+    Ok(())
 }
 
 #[tauri::command]
 fn set_automatic(enabled: bool, state: State<'_, AppState>) -> Result<(), String> {
+    let rules = state.config.read().unwrap().applications.clone();
     state.config.write().unwrap().automatic_application = enabled;
-    persist(&state)
+    persist(&state)?;
+    if !enabled {
+        for rule in &rules {
+            restore_rule_windows(rule, &state);
+        }
+    }
+    Ok(())
 }
 
 #[tauri::command]
@@ -220,17 +232,13 @@ fn set_startup(enabled: bool, state: State<'_, AppState>) -> Result<(), String> 
 #[tauri::command]
 fn reset_settings(state: State<'_, AppState>) -> Result<(), String> {
     let rules = state.config.read().unwrap().applications.clone();
-    for rule in &rules {
-        for window in enumerate_windows()
-            .iter()
-            .filter(|window| rule.matches(window))
-        {
-            let _ = state.controller.restore_borders(window.hwnd);
-        }
-    }
     *state.config.write().unwrap() = Config::default();
+    persist(&state)?;
+    for rule in &rules {
+        restore_rule_windows(rule, &state);
+    }
     let _ = startup::set_enabled(true);
-    persist(&state)
+    Ok(())
 }
 
 #[tauri::command]
@@ -241,9 +249,12 @@ fn exit_app(app: tauri::AppHandle) {
 #[tauri::command]
 fn restart_as_admin(app: AppHandle) -> Result<(), String> {
     use windows::{
-        Win32::UI::{Shell::ShellExecuteW, WindowsAndMessaging::SW_SHOWNORMAL},
+        Win32::UI::{Shell::ShellExecuteW, WindowsAndMessaging::SW_HIDE},
         core::PCWSTR,
     };
+    if let Some(window) = app.get_webview_window("main") {
+        let _ = window.hide();
+    }
     let executable = std::env::current_exe().map_err(|error| error.to_string())?;
     let executable: Vec<u16> = executable
         .as_os_str()
@@ -252,14 +263,15 @@ fn restart_as_admin(app: AppHandle) -> Result<(), String> {
         .chain(Some(0))
         .collect();
     let operation: Vec<u16> = "runas\0".encode_utf16().collect();
+    let parameters: Vec<u16> = "--replace --background\0".encode_utf16().collect();
     let result = unsafe {
         ShellExecuteW(
             None,
             PCWSTR(operation.as_ptr()),
             PCWSTR(executable.as_ptr()),
+            PCWSTR(parameters.as_ptr()),
             None,
-            None,
-            SW_SHOWNORMAL,
+            SW_HIDE,
         )
     };
     if result.0 as isize <= 32 {
@@ -335,7 +347,7 @@ async fn install_background_update(app: tauri::AppHandle) {
 
 pub fn run(instance: SingleInstance) -> anyhow::Result<()> {
     std::mem::forget(instance);
-    let quiet = std::env::args().any(|arg| arg == "--autostart");
+    let quiet = std::env::args().any(|arg| matches!(arg.as_str(), "--autostart" | "--background"));
     tauri::Builder::default()
         .plugin(tauri_plugin_updater::Builder::new().build())
         .setup(move |app| {

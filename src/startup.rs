@@ -68,7 +68,7 @@ pub fn ensure_elevated_task() -> Result<()> {
     let executable = std::env::current_exe().context("resolve Bald executable")?;
     let executable = executable.to_string_lossy().replace('\'', "''");
     let script = format!(
-        "$a=New-ScheduledTaskAction -Execute '{executable}' -Argument '--elevated-task';\
+        "$a=New-ScheduledTaskAction -Execute '{executable}' -Argument '--elevated-task --background';\
          $p=New-ScheduledTaskPrincipal -UserId $env:USERNAME -LogonType Interactive -RunLevel Highest;\
          $s=New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -ExecutionTimeLimit ([TimeSpan]::Zero);\
          Register-ScheduledTask -TaskName '{ELEVATED_TASK_NAME}' -Action $a -Principal $p -Settings $s -Force | Out-Null"

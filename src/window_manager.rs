@@ -8,24 +8,30 @@ use std::{
 };
 
 use anyhow::{Result, bail};
-use windows::Win32::{
-    Foundation::{CloseHandle, GetLastError, HWND, LPARAM, POINT, RECT, SetLastError, WIN32_ERROR},
-    Graphics::Gdi::ClientToScreen,
-    System::Threading::{
-        OpenProcess, PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION,
-        QueryFullProcessImageNameW,
-    },
-    UI::{
-        Input::KeyboardAndMouse::{GetAsyncKeyState, VK_LBUTTON},
-        WindowsAndMessaging::{
-            EnumWindows, GA_ROOT, GW_OWNER, GWL_EXSTYLE, GWL_STYLE, GetAncestor, GetClassNameW,
-            GetClientRect, GetCursorPos, GetWindow, GetWindowLongW, GetWindowPlacement,
-            GetWindowRect, GetWindowTextW, GetWindowThreadProcessId, IsIconic, IsWindow,
-            IsWindowVisible, SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE,
-            SWP_NOZORDER, SetWindowLongW, SetWindowPlacement, SetWindowPos, WINDOWPLACEMENT,
-            WS_BORDER, WS_CAPTION, WS_DLGFRAME, WS_EX_TOOLWINDOW, WS_THICKFRAME, WindowFromPoint,
+use windows::{
+    Win32::{
+        Foundation::{
+            CloseHandle, GetLastError, HANDLE, HWND, LPARAM, POINT, RECT, SetLastError, WIN32_ERROR,
+        },
+        Graphics::Gdi::ClientToScreen,
+        System::Threading::{
+            OpenProcess, PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION,
+            QueryFullProcessImageNameW,
+        },
+        UI::{
+            Input::KeyboardAndMouse::{GetAsyncKeyState, VK_LBUTTON},
+            WindowsAndMessaging::{
+                EnumWindows, GA_ROOT, GW_OWNER, GWL_EXSTYLE, GWL_STYLE, GetAncestor, GetClassNameW,
+                GetClientRect, GetCursorPos, GetPropW, GetWindow, GetWindowLongW,
+                GetWindowPlacement, GetWindowRect, GetWindowTextW, GetWindowThreadProcessId,
+                IsIconic, IsWindow, IsWindowVisible, RemovePropW, SWP_FRAMECHANGED, SWP_NOACTIVATE,
+                SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, SetPropW, SetWindowLongW, SetWindowPlacement,
+                SetWindowPos, WINDOWPLACEMENT, WS_BORDER, WS_CAPTION, WS_DLGFRAME,
+                WS_EX_TOOLWINDOW, WS_SYSMENU, WS_THICKFRAME, WindowFromPoint,
+            },
         },
     },
+    core::w,
 };
 
 pub struct ExecutableIcon {
@@ -291,6 +297,15 @@ struct ActiveDrag {
 
 impl WindowController {
     pub fn make_borderless(&self, hwnd_value: isize) -> Result<bool> {
+        if self
+            .drag
+            .lock()
+            .unwrap()
+            .active
+            .is_some_and(|drag| drag.hwnd == hwnd_value)
+        {
+            return Ok(false);
+        }
         let hwnd = HWND(hwnd_value as *mut c_void);
         unsafe {
             if !IsWindow(Some(hwnd)).as_bool() {
@@ -336,6 +351,11 @@ impl WindowController {
                     placement,
                     drag_height: (client_origin.y - window_rect.top).clamp(24, 48),
                 });
+            let _ = SetPropW(
+                hwnd,
+                w!("Bald.OriginalStyle"),
+                Some(HANDLE(current as isize as *mut c_void)),
+            );
             SetLastError(WIN32_ERROR(0));
             let previous =
                 SetWindowLongW(hwnd, GWL_STYLE, (current as u32 & !BORDER_STYLES) as i32);
@@ -363,29 +383,36 @@ impl WindowController {
     }
 
     pub fn restore_borders(&self, hwnd_value: isize) -> Result<bool> {
-        let Some(original) = self
-            .original_windows
-            .lock()
-            .unwrap()
-            .get(&hwnd_value)
-            .copied()
-        else {
-            return Ok(false);
-        };
         let hwnd = HWND(hwnd_value as *mut c_void);
         unsafe {
             if !IsWindow(Some(hwnd)).as_bool() {
                 bail!("window no longer exists");
             }
+            let original = self
+                .original_windows
+                .lock()
+                .unwrap()
+                .get(&hwnd_value)
+                .copied();
+            let saved_style = GetPropW(hwnd, w!("Bald.OriginalStyle"));
+            let current = GetWindowLongW(hwnd, GWL_STYLE);
+            let style = original
+                .map(|state| state.style)
+                .or_else(|| (!saved_style.0.is_null()).then_some(saved_style.0 as isize as i32))
+                .unwrap_or_else(|| {
+                    (current as u32 | WS_CAPTION.0 | WS_THICKFRAME.0 | WS_SYSMENU.0) as i32
+                });
             SetLastError(WIN32_ERROR(0));
-            let previous = SetWindowLongW(hwnd, GWL_STYLE, original.style);
+            let previous = SetWindowLongW(hwnd, GWL_STYLE, style);
             if previous == 0 {
                 let error = GetLastError();
                 if error.0 != 0 {
                     bail!("restore SetWindowLongW failed: {}", error.0);
                 }
             }
-            SetWindowPlacement(hwnd, &original.placement)?;
+            if let Some(original) = original {
+                SetWindowPlacement(hwnd, &original.placement)?;
+            }
             SetWindowPos(
                 hwnd,
                 None,
@@ -396,22 +423,23 @@ impl WindowController {
                 SWP_FRAMECHANGED | SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE,
             )?;
             self.original_windows.lock().unwrap().remove(&hwnd_value);
+            let _ = RemovePropW(hwnd, w!("Bald.OriginalStyle"));
         }
         Ok(true)
     }
 
-    pub fn poll_window_drag(&self) {
+    pub fn poll_window_drag(&self) -> bool {
         let left_down = unsafe { GetAsyncKeyState(VK_LBUTTON.0 as i32) < 0 };
         let mut drag = self.drag.lock().unwrap();
         if !left_down {
+            let ended = drag.active.take().is_some();
             drag.button_down = false;
-            drag.active = None;
-            return;
+            return ended;
         }
 
         let mut cursor = POINT::default();
         if unsafe { GetCursorPos(&mut cursor) }.is_err() {
-            return;
+            return false;
         }
         if let Some(active) = drag.active {
             let (x, y) = drag_position(active, cursor);
@@ -427,17 +455,29 @@ impl WindowController {
                     SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE,
                 );
             }
-            return;
+            if let Some(original) = self.original_windows.lock().unwrap().get_mut(&active.hwnd) {
+                let width = original.placement.rcNormalPosition.right
+                    - original.placement.rcNormalPosition.left;
+                let height = original.placement.rcNormalPosition.bottom
+                    - original.placement.rcNormalPosition.top;
+                original.placement.rcNormalPosition = RECT {
+                    left: x,
+                    top: y,
+                    right: x + width,
+                    bottom: y + height,
+                };
+            }
+            return false;
         }
         if drag.button_down {
-            return;
+            return false;
         }
         drag.button_down = true;
 
         let hovered = unsafe { WindowFromPoint(cursor) };
         let root = unsafe { GetAncestor(hovered, GA_ROOT) };
         if root.0.is_null() {
-            return;
+            return false;
         }
         let hwnd_value = root.0 as isize;
         let drag_height = self
@@ -447,13 +487,13 @@ impl WindowController {
             .get(&hwnd_value)
             .map(|state| state.drag_height);
         let Some(drag_height) = drag_height else {
-            return;
+            return false;
         };
         let mut rect = RECT::default();
         if unsafe { GetWindowRect(root, &mut rect) }.is_err()
             || !is_drag_point(cursor, rect, drag_height)
         {
-            return;
+            return false;
         }
 
         drag.active = Some(ActiveDrag {
@@ -462,6 +502,7 @@ impl WindowController {
             window_left: rect.left,
             window_top: rect.top,
         });
+        false
     }
 }
 

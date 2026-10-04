@@ -10,13 +10,22 @@ mod web_app;
 mod window_manager;
 
 fn main() -> anyhow::Result<()> {
-    let elevated_task = std::env::args().any(|argument| argument == "--elevated-task");
+    let arguments: Vec<_> = std::env::args().collect();
+    let elevated_task = arguments
+        .iter()
+        .any(|argument| argument == "--elevated-task");
+    let replace = arguments.iter().any(|argument| argument == "--replace");
     if !elevated_task && startup::launch_elevated_task()? {
         return Ok(());
     }
     let instance = single_instance::SingleInstance::acquire()?;
-    if !instance.is_primary() {
-        single_instance::show_existing();
+    if !instance.is_primary() && !replace {
+        let background = arguments
+            .iter()
+            .any(|argument| matches!(argument.as_str(), "--autostart" | "--background"));
+        if !background {
+            single_instance::show_existing();
+        }
         return Ok(());
     }
 
