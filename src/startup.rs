@@ -1,4 +1,7 @@
-use std::process::{Command, Stdio};
+use std::{
+    os::windows::process::CommandExt,
+    process::{Command, Stdio},
+};
 
 use anyhow::{Context, Result};
 use windows::{
@@ -12,28 +15,54 @@ use windows::{
 const RUN_KEY: &str = "Software\\Microsoft\\Windows\\CurrentVersion\\Run";
 const VALUE_NAME: &str = "Bald";
 const ELEVATED_TASK_NAME: &str = "Bald Elevated";
+const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+
+fn hidden_command(program: &str) -> Command {
+    let mut command = Command::new(program);
+    command
+        .creation_flags(CREATE_NO_WINDOW)
+        .stdin(Stdio::null())
+        .stderr(Stdio::null());
+    command
+}
+
+pub const fn is_development_build() -> bool {
+    cfg!(debug_assertions)
+}
 
 pub fn launch_elevated_task() -> Result<bool> {
-    let exists = Command::new("schtasks.exe")
-        .args(["/Query", "/TN", ELEVATED_TASK_NAME])
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-        .context("query elevated Bald task")?
-        .success();
-    if !exists {
+    if is_development_build() {
         return Ok(false);
     }
-    Ok(Command::new("schtasks.exe")
+
+    let query = hidden_command("schtasks.exe")
+        .args(["/Query", "/TN", ELEVATED_TASK_NAME, "/XML"])
+        .output()
+        .context("query elevated Bald task")?;
+    if !query.status.success() {
+        return Ok(false);
+    }
+
+    let executable = std::env::current_exe().context("resolve Bald executable")?;
+    let task_xml = String::from_utf8_lossy(&query.stdout).to_lowercase();
+    let executable = executable.to_string_lossy().to_lowercase();
+    if !task_xml.contains(&executable) {
+        return Ok(false);
+    }
+
+    Ok(hidden_command("schtasks.exe")
         .args(["/Run", "/TN", ELEVATED_TASK_NAME])
         .stdout(Stdio::null())
-        .stderr(Stdio::null())
         .status()
         .context("launch elevated Bald task")?
         .success())
 }
 
 pub fn ensure_elevated_task() -> Result<()> {
+    if is_development_build() {
+        return Ok(());
+    }
+
     use base64::{Engine, engine::general_purpose::STANDARD};
 
     let executable = std::env::current_exe().context("resolve Bald executable")?;
@@ -50,7 +79,7 @@ pub fn ensure_elevated_task() -> Result<()> {
             .flat_map(u16::to_le_bytes)
             .collect::<Vec<_>>(),
     );
-    let status = Command::new("powershell.exe")
+    let status = hidden_command("powershell.exe")
         .args([
             "-NoProfile",
             "-NonInteractive",
@@ -59,9 +88,7 @@ pub fn ensure_elevated_task() -> Result<()> {
             "-EncodedCommand",
             &encoded,
         ])
-        .stdin(Stdio::null())
         .stdout(Stdio::null())
-        .stderr(Stdio::null())
         .status()
         .context("register elevated Bald task")?;
     if !status.success() {
@@ -71,6 +98,10 @@ pub fn ensure_elevated_task() -> Result<()> {
 }
 
 pub fn set_enabled(enabled: bool) -> Result<()> {
+    if is_development_build() {
+        return Ok(());
+    }
+
     unsafe {
         let mut key = HKEY::default();
         let run_key = wide(RUN_KEY);
