@@ -31,11 +31,20 @@ pub struct ExecutableIcon {
 }
 
 pub fn executable_icon(path: &str) -> Option<ExecutableIcon> {
-    // The shell image factory can return a thumbnail-style canvas for some games
-    // (notably Valorant), leaving the actual icon tiny in the center. The classic
-    // associated icon is the correct application icon and is large enough for the
-    // 36 px UI slot, so prefer it and keep the high-resolution path as a fallback.
-    legacy_executable_icon(path).or_else(|| high_resolution_executable_icon(path))
+    match high_resolution_executable_icon(path) {
+        Some(icon) if visible_pixel_ratio(&icon) >= 0.2 => Some(icon),
+        Some(icon) => legacy_executable_icon(path).or(Some(icon)),
+        None => legacy_executable_icon(path),
+    }
+}
+
+fn visible_pixel_ratio(icon: &ExecutableIcon) -> f32 {
+    let visible = icon
+        .rgba
+        .chunks_exact(4)
+        .filter(|pixel| pixel[3] > 8)
+        .count();
+    visible as f32 / (icon.width * icon.height).max(1) as f32
 }
 
 fn crop_transparent_padding(icon: ExecutableIcon) -> ExecutableIcon {
@@ -458,6 +467,22 @@ mod tests {
         });
         assert_eq!((cropped.width, cropped.height), (2, 2));
         assert_eq!(cropped.rgba.len(), 2 * 2 * 4);
+    }
+
+    #[test]
+    fn detects_sparse_icon_canvas() {
+        let mut rgba = vec![0; 10 * 10 * 4];
+        for y in 4..7 {
+            for x in 4..7 {
+                rgba[(y * 10 + x) * 4 + 3] = 255;
+            }
+        }
+        let icon = ExecutableIcon {
+            width: 10,
+            height: 10,
+            rgba,
+        };
+        assert!(visible_pixel_ratio(&icon) < 0.2);
     }
 
     #[test]
