@@ -4,10 +4,7 @@
 use std::{
     collections::HashMap,
     ffi::c_void,
-    sync::{
-        Arc, Mutex,
-        atomic::{AtomicBool, Ordering},
-    },
+    sync::{Arc, Mutex},
 };
 
 use anyhow::{Result, bail};
@@ -19,15 +16,14 @@ use windows::Win32::{
         QueryFullProcessImageNameW,
     },
     UI::{
-        Input::KeyboardAndMouse::{GetAsyncKeyState, ReleaseCapture, VK_LBUTTON},
+        Input::KeyboardAndMouse::{GetAsyncKeyState, VK_LBUTTON},
         WindowsAndMessaging::{
             EnumWindows, GA_ROOT, GW_OWNER, GWL_EXSTYLE, GWL_STYLE, GetAncestor, GetClassNameW,
             GetClientRect, GetCursorPos, GetWindow, GetWindowLongW, GetWindowPlacement,
-            GetWindowRect, GetWindowTextW, GetWindowThreadProcessId, HTCAPTION, IsIconic, IsWindow,
-            IsWindowVisible, PostMessageW, SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE,
-            SWP_NOSIZE, SWP_NOZORDER, SetWindowLongW, SetWindowPlacement, SetWindowPos,
-            WINDOWPLACEMENT, WM_NCLBUTTONDOWN, WS_BORDER, WS_CAPTION, WS_DLGFRAME,
-            WS_EX_TOOLWINDOW, WS_THICKFRAME, WindowFromPoint,
+            GetWindowRect, GetWindowTextW, GetWindowThreadProcessId, IsIconic, IsWindow,
+            IsWindowVisible, SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE,
+            SWP_NOZORDER, SetWindowLongW, SetWindowPlacement, SetWindowPos, WINDOWPLACEMENT,
+            WS_BORDER, WS_CAPTION, WS_DLGFRAME, WS_EX_TOOLWINDOW, WS_THICKFRAME, WindowFromPoint,
         },
     },
 };
@@ -269,7 +265,7 @@ pub struct WindowInfo {
 #[derive(Clone, Default)]
 pub struct WindowController {
     original_windows: Arc<Mutex<HashMap<isize, OriginalWindowState>>>,
-    drag_button_down: Arc<AtomicBool>,
+    drag: Arc<Mutex<DragMonitorState>>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -277,6 +273,20 @@ struct OriginalWindowState {
     style: i32,
     placement: WINDOWPLACEMENT,
     drag_height: i32,
+}
+
+#[derive(Debug, Default)]
+struct DragMonitorState {
+    button_down: bool,
+    active: Option<ActiveDrag>,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct ActiveDrag {
+    hwnd: isize,
+    cursor_origin: POINT,
+    window_left: i32,
+    window_top: i32,
 }
 
 impl WindowController {
@@ -392,8 +402,10 @@ impl WindowController {
 
     pub fn poll_window_drag(&self) {
         let left_down = unsafe { GetAsyncKeyState(VK_LBUTTON.0 as i32) < 0 };
-        let was_down = self.drag_button_down.swap(left_down, Ordering::Relaxed);
-        if !left_down || was_down {
+        let mut drag = self.drag.lock().unwrap();
+        if !left_down {
+            drag.button_down = false;
+            drag.active = None;
             return;
         }
 
@@ -401,6 +413,27 @@ impl WindowController {
         if unsafe { GetCursorPos(&mut cursor) }.is_err() {
             return;
         }
+        if let Some(active) = drag.active {
+            let (x, y) = drag_position(active, cursor);
+            let hwnd = HWND(active.hwnd as *mut c_void);
+            unsafe {
+                let _ = SetWindowPos(
+                    hwnd,
+                    None,
+                    x,
+                    y,
+                    0,
+                    0,
+                    SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE,
+                );
+            }
+            return;
+        }
+        if drag.button_down {
+            return;
+        }
+        drag.button_down = true;
+
         let hovered = unsafe { WindowFromPoint(cursor) };
         let root = unsafe { GetAncestor(hovered, GA_ROOT) };
         if root.0.is_null() {
@@ -423,16 +456,12 @@ impl WindowController {
             return;
         }
 
-        let coordinates = ((cursor.y as u16 as u32) << 16) | cursor.x as u16 as u32;
-        unsafe {
-            let _ = ReleaseCapture();
-            let _ = PostMessageW(
-                Some(root),
-                WM_NCLBUTTONDOWN,
-                windows::Win32::Foundation::WPARAM(HTCAPTION as usize),
-                LPARAM(coordinates as isize),
-            );
-        }
+        drag.active = Some(ActiveDrag {
+            hwnd: hwnd_value,
+            cursor_origin: cursor,
+            window_left: rect.left,
+            window_top: rect.top,
+        });
     }
 }
 
@@ -441,6 +470,13 @@ fn is_drag_point(point: POINT, rect: RECT, drag_height: i32) -> bool {
         && point.x < rect.right
         && point.y >= rect.top
         && point.y < rect.top + drag_height
+}
+
+fn drag_position(drag: ActiveDrag, cursor: POINT) -> (i32, i32) {
+    (
+        drag.window_left + cursor.x - drag.cursor_origin.x,
+        drag.window_top + cursor.y - drag.cursor_origin.y,
+    )
 }
 
 pub fn enumerate_windows() -> Vec<WindowInfo> {
@@ -565,6 +601,18 @@ mod tests {
         assert!(is_drag_point(POINT { x: 400, y: 224 }, rect, 32));
         assert!(!is_drag_point(POINT { x: 400, y: 240 }, rect, 32));
         assert!(!is_drag_point(POINT { x: 99, y: 224 }, rect, 32));
+    }
+
+    #[test]
+    fn dragging_preserves_the_click_offset_in_both_axes() {
+        let drag = ActiveDrag {
+            hwnd: 1,
+            cursor_origin: POINT { x: 350, y: 220 },
+            window_left: 100,
+            window_top: 200,
+        };
+        assert_eq!(drag_position(drag, POINT { x: 400, y: 280 }), (150, 260));
+        assert_eq!(drag_position(drag, drag.cursor_origin), (100, 200));
     }
 
     #[test]

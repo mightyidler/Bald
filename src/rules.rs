@@ -27,8 +27,7 @@ impl ApplicationRule {
 
     pub fn matches(&self, window: &WindowInfo) -> bool {
         if let (Some(expected), Some(actual)) = (&self.executable_path, &window.executable_path) {
-            return normalize_path(expected) == normalize_path(actual)
-                && self.class_matches_when_needed(window);
+            return normalize_path(expected) == normalize_path(actual);
         }
         self.executable_name
             .eq_ignore_ascii_case(&window.executable_name)
@@ -75,12 +74,11 @@ mod tests {
 
     #[test]
     fn exact_path_is_case_and_separator_insensitive() {
-        let mut rule = ApplicationRule::from_window(&window(
+        let rule = ApplicationRule::from_window(&window(
             Some(r"C:\Games\Example.exe"),
             "Example.exe",
             "GameWindow",
         ));
-        rule.window_class_hint = None;
         assert!(rule.matches(&window(
             Some("c:/games/example.exe"),
             "Example.exe",

@@ -42,7 +42,7 @@ impl Watcher {
                 }
                 if Instant::now() >= next_scan {
                     scan(&config, &statuses, &controller);
-                    next_scan = Instant::now() + Duration::from_secs(4);
+                    next_scan = Instant::now() + Duration::from_millis(100);
                 }
                 controller.poll_window_drag();
                 match wake_rx.recv_timeout(Duration::from_millis(16)) {
