@@ -2,6 +2,8 @@
 /target-verify/
 /node_modules/
 /.reference/
+/artifacts/
+/gen/
 *.log
 .env
 updater.key
