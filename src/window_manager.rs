@@ -4,7 +4,10 @@
 use std::{
     collections::HashMap,
     ffi::c_void,
-    sync::{Arc, Mutex},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicBool, Ordering},
+    },
 };
 
 use anyhow::{Result, bail};
@@ -268,6 +271,7 @@ pub struct WindowInfo {
 pub struct WindowController {
     original_windows: Arc<Mutex<HashMap<isize, OriginalWindowState>>>,
     drag: Arc<Mutex<DragMonitorState>>,
+    shutting_down: Arc<AtomicBool>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -292,6 +296,9 @@ struct ActiveDrag {
 
 impl WindowController {
     pub fn make_borderless(&self, hwnd_value: isize) -> Result<bool> {
+        if self.shutting_down.load(Ordering::Acquire) {
+            return Ok(false);
+        }
         if self
             .drag
             .lock()
@@ -423,7 +430,28 @@ impl WindowController {
         Ok(true)
     }
 
+    pub fn begin_shutdown(&self) -> bool {
+        !self.shutting_down.swap(true, Ordering::AcqRel)
+    }
+
+    pub fn restore_all_borders(&self) {
+        self.end_window_drag();
+        let handles: Vec<_> = self
+            .original_windows
+            .lock()
+            .unwrap()
+            .keys()
+            .copied()
+            .collect();
+        for hwnd in handles {
+            let _ = self.restore_borders(hwnd);
+        }
+    }
+
     pub fn begin_window_drag(&self, cursor: POINT) -> bool {
+        if self.shutting_down.load(Ordering::Acquire) {
+            return false;
+        }
         let mut drag = self.drag.lock().unwrap();
         if drag.active.is_some() {
             return false;
@@ -646,6 +674,13 @@ mod tests {
         };
         assert_eq!(drag_position(drag, POINT { x: 400, y: 280 }), (150, 260));
         assert_eq!(drag_position(drag, drag.cursor_origin), (100, 200));
+    }
+
+    #[test]
+    fn shutdown_is_only_started_once() {
+        let controller = WindowController::default();
+        assert!(controller.begin_shutdown());
+        assert!(!controller.begin_shutdown());
     }
 
     #[test]

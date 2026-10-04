@@ -8,14 +8,15 @@ use std::{
 use uuid::Uuid;
 use windows::Win32::{
     Foundation::{HINSTANCE, HWND, LPARAM, LRESULT, WPARAM},
-    System::LibraryLoader::GetModuleHandleW,
+    System::{LibraryLoader::GetModuleHandleW, Threading::GetCurrentThreadId},
     UI::{
         Accessibility::{HWINEVENTHOOK, SetWinEventHook, UnhookWinEvent},
         WindowsAndMessaging::{
-            CallNextHookEx, DispatchMessageW, EVENT_OBJECT_CREATE, EVENT_OBJECT_SHOW, MSG,
-            MSLLHOOKSTRUCT, OBJID_WINDOW, PM_REMOVE, PeekMessageW, SetWindowsHookExW,
-            TranslateMessage, UnhookWindowsHookEx, WH_MOUSE_LL, WINEVENT_OUTOFCONTEXT,
-            WINEVENT_SKIPOWNPROCESS, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE,
+            CallNextHookEx, DispatchMessageW, EVENT_OBJECT_CREATE, EVENT_OBJECT_SHOW, GetMessageW,
+            MSG, MSLLHOOKSTRUCT, OBJID_WINDOW, PM_REMOVE, PeekMessageW, PostThreadMessageW,
+            SetWindowsHookExW, TranslateMessage, UnhookWindowsHookEx, WH_MOUSE_LL,
+            WINEVENT_OUTOFCONTEXT, WINEVENT_SKIPOWNPROCESS, WM_LBUTTONDOWN, WM_LBUTTONUP,
+            WM_MOUSEMOVE, WM_QUIT,
         },
     },
 };
@@ -37,10 +38,12 @@ pub struct Watcher {
     wake: mpsc::Sender<()>,
     stop: mpsc::Sender<()>,
     thread: Option<thread::JoinHandle<()>>,
+    mouse_thread_id: u32,
+    mouse_thread: Option<thread::JoinHandle<()>>,
 }
 
 static WINDOW_EVENT_WAKE: OnceLock<Mutex<Option<mpsc::Sender<()>>>> = OnceLock::new();
-static MOUSE_CONTROLLER: OnceLock<Mutex<Option<WindowController>>> = OnceLock::new();
+static MOUSE_CONTROLLER: OnceLock<WindowController> = OnceLock::new();
 
 unsafe extern "system" fn window_event_callback(
     _hook: HWINEVENTHOOK,
@@ -73,17 +76,20 @@ unsafe extern "system" fn mouse_hook_callback(
         return unsafe { CallNextHookEx(None, code, wparam, lparam) };
     }
     let point = unsafe { (*(lparam.0 as *const MSLLHOOKSTRUCT)).pt };
-    let controller = MOUSE_CONTROLLER
-        .get_or_init(|| Mutex::new(None))
-        .lock()
-        .unwrap()
-        .clone();
-    let Some(controller) = controller else {
+    let Some(controller) = MOUSE_CONTROLLER.get() else {
         return unsafe { CallNextHookEx(None, code, wparam, lparam) };
     };
-    let handled = match wparam.0 as u32 {
-        WM_LBUTTONDOWN => controller.begin_window_drag(point),
-        WM_MOUSEMOVE => controller.move_window_drag(point),
+    let suppress = match wparam.0 as u32 {
+        WM_LBUTTONDOWN => {
+            // Recover from a missed button-up (for example across the secure desktop)
+            // before deciding whether this new click starts a managed drag.
+            controller.end_window_drag();
+            controller.begin_window_drag(point)
+        }
+        WM_MOUSEMOVE => {
+            controller.move_window_drag(point);
+            false
+        }
         WM_LBUTTONUP => {
             let ended = controller.end_window_drag();
             if ended {
@@ -96,11 +102,11 @@ unsafe extern "system" fn mouse_hook_callback(
                     let _ = sender.send(());
                 }
             }
-            ended
+            false
         }
         _ => false,
     };
-    if handled {
+    if suppress {
         LRESULT(1)
     } else {
         unsafe { CallNextHookEx(None, code, wparam, lparam) }
@@ -115,14 +121,35 @@ impl Watcher {
     ) -> Self {
         let (wake_tx, wake_rx) = mpsc::channel();
         let (stop_tx, stop_rx) = mpsc::channel();
+        let (mouse_ready_tx, mouse_ready_rx) = mpsc::sync_channel(1);
         *WINDOW_EVENT_WAKE
             .get_or_init(|| Mutex::new(None))
             .lock()
             .unwrap() = Some(wake_tx.clone());
-        *MOUSE_CONTROLLER
-            .get_or_init(|| Mutex::new(None))
-            .lock()
-            .unwrap() = Some(controller.clone());
+        let _ = MOUSE_CONTROLLER.set(controller.clone());
+        let mouse_thread = thread::spawn(move || {
+            let thread_id = unsafe { GetCurrentThreadId() };
+            let module = unsafe {
+                GetModuleHandleW(None)
+                    .ok()
+                    .map(|module| HINSTANCE(module.0))
+            };
+            let mouse_hook = unsafe {
+                SetWindowsHookExW(WH_MOUSE_LL, Some(mouse_hook_callback), module, 0).ok()
+            };
+            let _ = mouse_ready_tx.send(thread_id);
+            if let Some(mouse_hook) = mouse_hook {
+                let mut message = MSG::default();
+                unsafe {
+                    while GetMessageW(&mut message, None, 0, 0).0 > 0 {
+                        let _ = TranslateMessage(&message);
+                        DispatchMessageW(&message);
+                    }
+                    let _ = UnhookWindowsHookEx(mouse_hook);
+                }
+            }
+        });
+        let mouse_thread_id = mouse_ready_rx.recv().unwrap_or(0);
         let thread = thread::spawn(move || {
             let hook = unsafe {
                 SetWinEventHook(
@@ -134,14 +161,6 @@ impl Watcher {
                     0,
                     WINEVENT_OUTOFCONTEXT | WINEVENT_SKIPOWNPROCESS,
                 )
-            };
-            let module = unsafe {
-                GetModuleHandleW(None)
-                    .ok()
-                    .map(|module| HINSTANCE(module.0))
-            };
-            let mouse_hook = unsafe {
-                SetWindowsHookExW(WH_MOUSE_LL, Some(mouse_hook_callback), module, 0).ok()
             };
             let mut next_scan = Instant::now();
             loop {
@@ -170,16 +189,13 @@ impl Watcher {
                     let _ = UnhookWinEvent(hook);
                 }
             }
-            if let Some(mouse_hook) = mouse_hook {
-                unsafe {
-                    let _ = UnhookWindowsHookEx(mouse_hook);
-                }
-            }
         });
         Self {
             wake: wake_tx,
             stop: stop_tx,
             thread: Some(thread),
+            mouse_thread_id,
+            mouse_thread: Some(mouse_thread),
         }
     }
 
@@ -195,10 +211,14 @@ impl Drop for Watcher {
         if let Some(thread) = self.thread.take() {
             let _ = thread.join();
         }
-        *MOUSE_CONTROLLER
-            .get_or_init(|| Mutex::new(None))
-            .lock()
-            .unwrap() = None;
+        if self.mouse_thread_id != 0 {
+            unsafe {
+                let _ = PostThreadMessageW(self.mouse_thread_id, WM_QUIT, WPARAM(0), LPARAM(0));
+            }
+        }
+        if let Some(thread) = self.mouse_thread.take() {
+            let _ = thread.join();
+        }
     }
 }
 

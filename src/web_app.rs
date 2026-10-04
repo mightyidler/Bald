@@ -33,6 +33,25 @@ struct AppState {
     icon_cache: Mutex<HashMap<String, String>>,
 }
 
+impl AppState {
+    fn restore_before_exit(&self) {
+        if !self.controller.begin_shutdown() {
+            return;
+        }
+        // A scan holds the matching read lock until it finishes applying styles.
+        // Taking the write lock here waits for that work and prevents a late scan
+        // from making a restored window borderless again during shutdown.
+        let _config = self.config.write().unwrap();
+        self.controller.restore_all_borders();
+    }
+}
+
+impl Drop for AppState {
+    fn drop(&mut self) {
+        self.restore_before_exit();
+    }
+}
+
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 struct UiState {
@@ -242,7 +261,8 @@ fn reset_settings(state: State<'_, AppState>) -> Result<(), String> {
 }
 
 #[tauri::command]
-fn exit_app(app: tauri::AppHandle) {
+fn exit_app(app: tauri::AppHandle, state: State<'_, AppState>) {
+    state.restore_before_exit();
     app.exit(0);
 }
 
@@ -276,6 +296,9 @@ fn restart_as_admin(app: AppHandle) -> Result<(), String> {
     };
     if result.0 as isize <= 32 {
         return Err(format!("elevation request failed: {}", result.0 as isize));
+    }
+    if let Some(state) = app.try_state::<AppState>() {
+        state.restore_before_exit();
     }
     app.exit(0);
     Ok(())
@@ -327,6 +350,9 @@ async fn check_for_updates_manual(app: tauri::AppHandle) -> Result<String, Strin
                 .download_and_install(|_, _| {}, || {})
                 .await
                 .map_err(|error| error.to_string())?;
+            if let Some(state) = app.try_state::<AppState>() {
+                state.restore_before_exit();
+            }
             app.restart()
         }
         None => Ok("LATEST".to_owned()),
@@ -341,6 +367,9 @@ async fn install_background_update(app: tauri::AppHandle) {
         return;
     };
     if update.download_and_install(|_, _| {}, || {}).await.is_ok() {
+        if let Some(state) = app.try_state::<AppState>() {
+            state.restore_before_exit();
+        }
         app.restart();
     }
 }
@@ -387,7 +416,12 @@ pub fn run(instance: SingleInstance) -> anyhow::Result<()> {
                 .tooltip("Bald")
                 .menu(&menu)
                 .on_menu_event(|app, event| match event.id.as_ref() {
-                    "quit" => app.exit(0),
+                    "quit" => {
+                        if let Some(state) = app.try_state::<AppState>() {
+                            state.restore_before_exit();
+                        }
+                        app.exit(0);
+                    }
                     "show" => {
                         if let Some(window) = app.get_webview_window("main") {
                             let _ = window.show();
