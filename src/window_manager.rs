@@ -14,7 +14,8 @@ use anyhow::{Result, bail};
 use windows::{
     Win32::{
         Foundation::{
-            CloseHandle, GetLastError, HANDLE, HWND, LPARAM, POINT, RECT, SetLastError, WIN32_ERROR,
+            CloseHandle, GetLastError, HANDLE, HWND, LPARAM, POINT, RECT, SetLastError,
+            WIN32_ERROR, WPARAM,
         },
         Graphics::Gdi::ClientToScreen,
         System::Threading::{
@@ -24,10 +25,11 @@ use windows::{
         UI::WindowsAndMessaging::{
             EnumWindows, GA_ROOT, GW_OWNER, GWL_EXSTYLE, GWL_STYLE, GetAncestor, GetClassNameW,
             GetClientRect, GetPropW, GetWindow, GetWindowLongW, GetWindowPlacement, GetWindowRect,
-            GetWindowTextW, GetWindowThreadProcessId, IsIconic, IsWindow, IsWindowVisible,
-            RemovePropW, SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER,
-            SetPropW, SetWindowLongW, SetWindowPlacement, SetWindowPos, WINDOWPLACEMENT, WS_BORDER,
-            WS_CAPTION, WS_DLGFRAME, WS_EX_TOOLWINDOW, WS_SYSMENU, WS_THICKFRAME, WindowFromPoint,
+            GetWindowTextW, GetWindowThreadProcessId, HTCAPTION, IsIconic, IsWindow,
+            IsWindowVisible, PostMessageW, RemovePropW, SWP_FRAMECHANGED, SWP_NOACTIVATE,
+            SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, SetPropW, SetWindowLongW, SetWindowPlacement,
+            SetWindowPos, WINDOWPLACEMENT, WM_NCLBUTTONDOWN, WS_BORDER, WS_CAPTION, WS_DLGFRAME,
+            WS_EX_TOOLWINDOW, WS_SYSMENU, WS_THICKFRAME, WindowFromPoint,
         },
     },
     core::w,
@@ -270,7 +272,6 @@ pub struct WindowInfo {
 #[derive(Clone, Default)]
 pub struct WindowController {
     original_windows: Arc<Mutex<HashMap<isize, OriginalWindowState>>>,
-    drag: Arc<Mutex<DragMonitorState>>,
     shutting_down: Arc<AtomicBool>,
 }
 
@@ -281,31 +282,9 @@ struct OriginalWindowState {
     drag_height: i32,
 }
 
-#[derive(Debug, Default)]
-struct DragMonitorState {
-    active: Option<ActiveDrag>,
-}
-
-#[derive(Debug, Clone, Copy)]
-struct ActiveDrag {
-    hwnd: isize,
-    cursor_origin: POINT,
-    window_left: i32,
-    window_top: i32,
-}
-
 impl WindowController {
     pub fn make_borderless(&self, hwnd_value: isize) -> Result<bool> {
         if self.shutting_down.load(Ordering::Acquire) {
-            return Ok(false);
-        }
-        if self
-            .drag
-            .lock()
-            .unwrap()
-            .active
-            .is_some_and(|drag| drag.hwnd == hwnd_value)
-        {
             return Ok(false);
         }
         let hwnd = HWND(hwnd_value as *mut c_void);
@@ -398,6 +377,8 @@ impl WindowController {
                 .copied();
             let saved_style = GetPropW(hwnd, w!("Bald.OriginalStyle"));
             let current = GetWindowLongW(hwnd, GWL_STYLE);
+            let mut current_rect = RECT::default();
+            let has_current_rect = GetWindowRect(hwnd, &mut current_rect).is_ok();
             let style = original
                 .map(|state| state.style)
                 .or_else(|| (!saved_style.0.is_null()).then_some(saved_style.0 as isize as i32))
@@ -412,7 +393,19 @@ impl WindowController {
                     bail!("restore SetWindowLongW failed: {}", error.0);
                 }
             }
-            if let Some(original) = original {
+            if let Some(mut original) = original {
+                if has_current_rect {
+                    let width = original.placement.rcNormalPosition.right
+                        - original.placement.rcNormalPosition.left;
+                    let height = original.placement.rcNormalPosition.bottom
+                        - original.placement.rcNormalPosition.top;
+                    original.placement.rcNormalPosition = RECT {
+                        left: current_rect.left,
+                        top: current_rect.top,
+                        right: current_rect.left + width,
+                        bottom: current_rect.top + height,
+                    };
+                }
                 SetWindowPlacement(hwnd, &original.placement)?;
             }
             SetWindowPos(
@@ -435,7 +428,6 @@ impl WindowController {
     }
 
     pub fn restore_all_borders(&self) {
-        self.end_window_drag();
         let handles: Vec<_> = self
             .original_windows
             .lock()
@@ -448,12 +440,8 @@ impl WindowController {
         }
     }
 
-    pub fn begin_window_drag(&self, cursor: POINT) -> bool {
+    pub fn start_native_window_drag(&self, cursor: POINT) -> bool {
         if self.shutting_down.load(Ordering::Acquire) {
-            return false;
-        }
-        let mut drag = self.drag.lock().unwrap();
-        if drag.active.is_some() {
             return false;
         }
 
@@ -479,50 +467,16 @@ impl WindowController {
             return false;
         }
 
-        drag.active = Some(ActiveDrag {
-            hwnd: hwnd_value,
-            cursor_origin: cursor,
-            window_left: rect.left,
-            window_top: rect.top,
-        });
-        true
-    }
-
-    pub fn move_window_drag(&self, cursor: POINT) -> bool {
-        let active = self.drag.lock().unwrap().active;
-        let Some(active) = active else {
-            return false;
-        };
-        let (x, y) = drag_position(active, cursor);
-        let hwnd = HWND(active.hwnd as *mut c_void);
+        let coordinates = (cursor.x as u16 as u32) | ((cursor.y as u16 as u32) << 16);
         unsafe {
-            let _ = SetWindowPos(
-                hwnd,
-                None,
-                x,
-                y,
-                0,
-                0,
-                SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE,
-            );
+            PostMessageW(
+                Some(root),
+                WM_NCLBUTTONDOWN,
+                WPARAM(HTCAPTION as usize),
+                LPARAM(coordinates as isize),
+            )
+            .is_ok()
         }
-        if let Some(original) = self.original_windows.lock().unwrap().get_mut(&active.hwnd) {
-            let width = original.placement.rcNormalPosition.right
-                - original.placement.rcNormalPosition.left;
-            let height = original.placement.rcNormalPosition.bottom
-                - original.placement.rcNormalPosition.top;
-            original.placement.rcNormalPosition = RECT {
-                left: x,
-                top: y,
-                right: x + width,
-                bottom: y + height,
-            };
-        }
-        true
-    }
-
-    pub fn end_window_drag(&self) -> bool {
-        self.drag.lock().unwrap().active.take().is_some()
     }
 }
 
@@ -531,13 +485,6 @@ fn is_drag_point(point: POINT, rect: RECT, drag_height: i32) -> bool {
         && point.x < rect.right
         && point.y >= rect.top
         && point.y < rect.top + drag_height
-}
-
-fn drag_position(drag: ActiveDrag, cursor: POINT) -> (i32, i32) {
-    (
-        drag.window_left + cursor.x - drag.cursor_origin.x,
-        drag.window_top + cursor.y - drag.cursor_origin.y,
-    )
 }
 
 pub fn enumerate_windows() -> Vec<WindowInfo> {
@@ -662,18 +609,6 @@ mod tests {
         assert!(is_drag_point(POINT { x: 400, y: 224 }, rect, 32));
         assert!(!is_drag_point(POINT { x: 400, y: 240 }, rect, 32));
         assert!(!is_drag_point(POINT { x: 99, y: 224 }, rect, 32));
-    }
-
-    #[test]
-    fn dragging_preserves_the_click_offset_in_both_axes() {
-        let drag = ActiveDrag {
-            hwnd: 1,
-            cursor_origin: POINT { x: 350, y: 220 },
-            window_left: 100,
-            window_top: 200,
-        };
-        assert_eq!(drag_position(drag, POINT { x: 400, y: 280 }), (150, 260));
-        assert_eq!(drag_position(drag, drag.cursor_origin), (100, 200));
     }
 
     #[test]

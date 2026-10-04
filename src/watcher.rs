@@ -15,8 +15,7 @@ use windows::Win32::{
             CallNextHookEx, DispatchMessageW, EVENT_OBJECT_CREATE, EVENT_OBJECT_SHOW, GetMessageW,
             MSG, MSLLHOOKSTRUCT, OBJID_WINDOW, PM_REMOVE, PeekMessageW, PostThreadMessageW,
             SetWindowsHookExW, TranslateMessage, UnhookWindowsHookEx, WH_MOUSE_LL,
-            WINEVENT_OUTOFCONTEXT, WINEVENT_SKIPOWNPROCESS, WM_LBUTTONDOWN, WM_LBUTTONUP,
-            WM_MOUSEMOVE, WM_QUIT,
+            WINEVENT_OUTOFCONTEXT, WINEVENT_SKIPOWNPROCESS, WM_LBUTTONDOWN, WM_QUIT,
         },
     },
 };
@@ -79,33 +78,7 @@ unsafe extern "system" fn mouse_hook_callback(
     let Some(controller) = MOUSE_CONTROLLER.get() else {
         return unsafe { CallNextHookEx(None, code, wparam, lparam) };
     };
-    let suppress = match wparam.0 as u32 {
-        WM_LBUTTONDOWN => {
-            // Recover from a missed button-up (for example across the secure desktop)
-            // before deciding whether this new click starts a managed drag.
-            controller.end_window_drag();
-            controller.begin_window_drag(point)
-        }
-        WM_MOUSEMOVE => {
-            controller.move_window_drag(point);
-            false
-        }
-        WM_LBUTTONUP => {
-            let ended = controller.end_window_drag();
-            if ended {
-                if let Some(sender) = WINDOW_EVENT_WAKE
-                    .get_or_init(|| Mutex::new(None))
-                    .lock()
-                    .unwrap()
-                    .as_ref()
-                {
-                    let _ = sender.send(());
-                }
-            }
-            false
-        }
-        _ => false,
-    };
+    let suppress = wparam.0 as u32 == WM_LBUTTONDOWN && controller.start_native_window_drag(point);
     if suppress {
         LRESULT(1)
     } else {
