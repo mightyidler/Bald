@@ -18,17 +18,13 @@ use windows::{
             OpenProcess, PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION,
             QueryFullProcessImageNameW,
         },
-        UI::{
-            Input::KeyboardAndMouse::{GetAsyncKeyState, VK_LBUTTON},
-            WindowsAndMessaging::{
-                EnumWindows, GA_ROOT, GW_OWNER, GWL_EXSTYLE, GWL_STYLE, GetAncestor, GetClassNameW,
-                GetClientRect, GetCursorPos, GetPropW, GetWindow, GetWindowLongW,
-                GetWindowPlacement, GetWindowRect, GetWindowTextW, GetWindowThreadProcessId,
-                IsIconic, IsWindow, IsWindowVisible, RemovePropW, SWP_FRAMECHANGED, SWP_NOACTIVATE,
-                SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, SetPropW, SetWindowLongW, SetWindowPlacement,
-                SetWindowPos, WINDOWPLACEMENT, WS_BORDER, WS_CAPTION, WS_DLGFRAME,
-                WS_EX_TOOLWINDOW, WS_SYSMENU, WS_THICKFRAME, WindowFromPoint,
-            },
+        UI::WindowsAndMessaging::{
+            EnumWindows, GA_ROOT, GW_OWNER, GWL_EXSTYLE, GWL_STYLE, GetAncestor, GetClassNameW,
+            GetClientRect, GetPropW, GetWindow, GetWindowLongW, GetWindowPlacement, GetWindowRect,
+            GetWindowTextW, GetWindowThreadProcessId, IsIconic, IsWindow, IsWindowVisible,
+            RemovePropW, SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER,
+            SetPropW, SetWindowLongW, SetWindowPlacement, SetWindowPos, WINDOWPLACEMENT, WS_BORDER,
+            WS_CAPTION, WS_DLGFRAME, WS_EX_TOOLWINDOW, WS_SYSMENU, WS_THICKFRAME, WindowFromPoint,
         },
     },
     core::w,
@@ -283,7 +279,6 @@ struct OriginalWindowState {
 
 #[derive(Debug, Default)]
 struct DragMonitorState {
-    button_down: bool,
     active: Option<ActiveDrag>,
 }
 
@@ -428,51 +423,11 @@ impl WindowController {
         Ok(true)
     }
 
-    pub fn poll_window_drag(&self) -> bool {
-        let left_down = unsafe { GetAsyncKeyState(VK_LBUTTON.0 as i32) < 0 };
+    pub fn begin_window_drag(&self, cursor: POINT) -> bool {
         let mut drag = self.drag.lock().unwrap();
-        if !left_down {
-            let ended = drag.active.take().is_some();
-            drag.button_down = false;
-            return ended;
-        }
-
-        let mut cursor = POINT::default();
-        if unsafe { GetCursorPos(&mut cursor) }.is_err() {
+        if drag.active.is_some() {
             return false;
         }
-        if let Some(active) = drag.active {
-            let (x, y) = drag_position(active, cursor);
-            let hwnd = HWND(active.hwnd as *mut c_void);
-            unsafe {
-                let _ = SetWindowPos(
-                    hwnd,
-                    None,
-                    x,
-                    y,
-                    0,
-                    0,
-                    SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE,
-                );
-            }
-            if let Some(original) = self.original_windows.lock().unwrap().get_mut(&active.hwnd) {
-                let width = original.placement.rcNormalPosition.right
-                    - original.placement.rcNormalPosition.left;
-                let height = original.placement.rcNormalPosition.bottom
-                    - original.placement.rcNormalPosition.top;
-                original.placement.rcNormalPosition = RECT {
-                    left: x,
-                    top: y,
-                    right: x + width,
-                    bottom: y + height,
-                };
-            }
-            return false;
-        }
-        if drag.button_down {
-            return false;
-        }
-        drag.button_down = true;
 
         let hovered = unsafe { WindowFromPoint(cursor) };
         let root = unsafe { GetAncestor(hovered, GA_ROOT) };
@@ -502,7 +457,44 @@ impl WindowController {
             window_left: rect.left,
             window_top: rect.top,
         });
-        false
+        true
+    }
+
+    pub fn move_window_drag(&self, cursor: POINT) -> bool {
+        let active = self.drag.lock().unwrap().active;
+        let Some(active) = active else {
+            return false;
+        };
+        let (x, y) = drag_position(active, cursor);
+        let hwnd = HWND(active.hwnd as *mut c_void);
+        unsafe {
+            let _ = SetWindowPos(
+                hwnd,
+                None,
+                x,
+                y,
+                0,
+                0,
+                SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE,
+            );
+        }
+        if let Some(original) = self.original_windows.lock().unwrap().get_mut(&active.hwnd) {
+            let width = original.placement.rcNormalPosition.right
+                - original.placement.rcNormalPosition.left;
+            let height = original.placement.rcNormalPosition.bottom
+                - original.placement.rcNormalPosition.top;
+            original.placement.rcNormalPosition = RECT {
+                left: x,
+                top: y,
+                right: x + width,
+                bottom: y + height,
+            };
+        }
+        true
+    }
+
+    pub fn end_window_drag(&self) -> bool {
+        self.drag.lock().unwrap().active.take().is_some()
     }
 }
 
