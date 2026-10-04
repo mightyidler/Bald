@@ -4,7 +4,10 @@
 use std::{
     collections::HashMap,
     ffi::c_void,
-    sync::{Arc, Mutex},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicBool, Ordering},
+    },
 };
 
 use anyhow::{Result, bail};
@@ -15,12 +18,17 @@ use windows::Win32::{
         OpenProcess, PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION,
         QueryFullProcessImageNameW,
     },
-    UI::WindowsAndMessaging::{
-        EnumWindows, GW_OWNER, GWL_EXSTYLE, GWL_STYLE, GetClassNameW, GetClientRect, GetWindow,
-        GetWindowLongW, GetWindowPlacement, GetWindowRect, GetWindowTextW,
-        GetWindowThreadProcessId, IsWindow, IsWindowVisible, SWP_FRAMECHANGED, SWP_NOACTIVATE,
-        SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, SetWindowLongW, SetWindowPlacement, SetWindowPos,
-        WINDOWPLACEMENT, WS_BORDER, WS_CAPTION, WS_DLGFRAME, WS_EX_TOOLWINDOW, WS_THICKFRAME,
+    UI::{
+        Input::KeyboardAndMouse::{GetAsyncKeyState, ReleaseCapture, VK_LBUTTON},
+        WindowsAndMessaging::{
+            EnumWindows, GA_ROOT, GW_OWNER, GWL_EXSTYLE, GWL_STYLE, GetAncestor, GetClassNameW,
+            GetClientRect, GetCursorPos, GetWindow, GetWindowLongW, GetWindowPlacement,
+            GetWindowRect, GetWindowTextW, GetWindowThreadProcessId, HTCAPTION, IsIconic, IsWindow,
+            IsWindowVisible, PostMessageW, SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE,
+            SWP_NOSIZE, SWP_NOZORDER, SetWindowLongW, SetWindowPlacement, SetWindowPos,
+            WINDOWPLACEMENT, WM_NCLBUTTONDOWN, WS_BORDER, WS_CAPTION, WS_DLGFRAME,
+            WS_EX_TOOLWINDOW, WS_THICKFRAME, WindowFromPoint,
+        },
     },
 };
 
@@ -261,12 +269,14 @@ pub struct WindowInfo {
 #[derive(Clone, Default)]
 pub struct WindowController {
     original_windows: Arc<Mutex<HashMap<isize, OriginalWindowState>>>,
+    drag_button_down: Arc<AtomicBool>,
 }
 
 #[derive(Debug, Clone, Copy)]
 struct OriginalWindowState {
     style: i32,
     placement: WINDOWPLACEMENT,
+    drag_height: i32,
 }
 
 impl WindowController {
@@ -275,6 +285,9 @@ impl WindowController {
         unsafe {
             if !IsWindow(Some(hwnd)).as_bool() {
                 bail!("window no longer exists");
+            }
+            if IsIconic(hwnd).as_bool() {
+                return Ok(false);
             }
             let current = GetWindowLongW(hwnd, GWL_STYLE);
             if current as u32 & BORDER_STYLES == 0 {
@@ -300,6 +313,9 @@ impl WindowController {
             ClientToScreen(hwnd, &mut client_origin).ok()?;
             let client_width = client_rect.right - client_rect.left;
             let client_height = client_rect.bottom - client_rect.top;
+            if client_width <= 0 || client_height <= 0 {
+                return Ok(false);
+            }
 
             self.original_windows
                 .lock()
@@ -308,6 +324,7 @@ impl WindowController {
                 .or_insert(OriginalWindowState {
                     style: current,
                     placement,
+                    drag_height: (client_origin.y - window_rect.top).clamp(24, 48),
                 });
             SetLastError(WIN32_ERROR(0));
             let previous =
@@ -372,6 +389,58 @@ impl WindowController {
         }
         Ok(true)
     }
+
+    pub fn poll_window_drag(&self) {
+        let left_down = unsafe { GetAsyncKeyState(VK_LBUTTON.0 as i32) < 0 };
+        let was_down = self.drag_button_down.swap(left_down, Ordering::Relaxed);
+        if !left_down || was_down {
+            return;
+        }
+
+        let mut cursor = POINT::default();
+        if unsafe { GetCursorPos(&mut cursor) }.is_err() {
+            return;
+        }
+        let hovered = unsafe { WindowFromPoint(cursor) };
+        let root = unsafe { GetAncestor(hovered, GA_ROOT) };
+        if root.0.is_null() {
+            return;
+        }
+        let hwnd_value = root.0 as isize;
+        let drag_height = self
+            .original_windows
+            .lock()
+            .unwrap()
+            .get(&hwnd_value)
+            .map(|state| state.drag_height);
+        let Some(drag_height) = drag_height else {
+            return;
+        };
+        let mut rect = RECT::default();
+        if unsafe { GetWindowRect(root, &mut rect) }.is_err()
+            || !is_drag_point(cursor, rect, drag_height)
+        {
+            return;
+        }
+
+        let coordinates = ((cursor.y as u16 as u32) << 16) | cursor.x as u16 as u32;
+        unsafe {
+            let _ = ReleaseCapture();
+            let _ = PostMessageW(
+                Some(root),
+                WM_NCLBUTTONDOWN,
+                windows::Win32::Foundation::WPARAM(HTCAPTION as usize),
+                LPARAM(coordinates as isize),
+            );
+        }
+    }
+}
+
+fn is_drag_point(point: POINT, rect: RECT, drag_height: i32) -> bool {
+    point.x >= rect.left
+        && point.x < rect.right
+        && point.y >= rect.top
+        && point.y < rect.top + drag_height
 }
 
 pub fn enumerate_windows() -> Vec<WindowInfo> {
@@ -483,6 +552,19 @@ mod tests {
             rgba,
         };
         assert!(visible_pixel_ratio(&icon) < 0.2);
+    }
+
+    #[test]
+    fn limits_dragging_to_the_original_title_bar_height() {
+        let rect = RECT {
+            left: 100,
+            top: 200,
+            right: 900,
+            bottom: 700,
+        };
+        assert!(is_drag_point(POINT { x: 400, y: 224 }, rect, 32));
+        assert!(!is_drag_point(POINT { x: 400, y: 240 }, rect, 32));
+        assert!(!is_drag_point(POINT { x: 99, y: 224 }, rect, 32));
     }
 
     #[test]

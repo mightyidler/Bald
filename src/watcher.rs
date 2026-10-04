@@ -2,7 +2,7 @@ use std::{
     collections::HashMap,
     sync::{Arc, RwLock, mpsc},
     thread,
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use uuid::Uuid;
@@ -35,13 +35,19 @@ impl Watcher {
         let (wake_tx, wake_rx) = mpsc::channel();
         let (stop_tx, stop_rx) = mpsc::channel();
         let thread = thread::spawn(move || {
+            let mut next_scan = Instant::now();
             loop {
                 if stop_rx.try_recv().is_ok() {
                     break;
                 }
-                scan(&config, &statuses, &controller);
-                match wake_rx.recv_timeout(Duration::from_secs(4)) {
-                    Ok(()) | Err(mpsc::RecvTimeoutError::Timeout) => {}
+                if Instant::now() >= next_scan {
+                    scan(&config, &statuses, &controller);
+                    next_scan = Instant::now() + Duration::from_secs(4);
+                }
+                controller.poll_window_drag();
+                match wake_rx.recv_timeout(Duration::from_millis(16)) {
+                    Ok(()) => next_scan = Instant::now(),
+                    Err(mpsc::RecvTimeoutError::Timeout) => {}
                     Err(mpsc::RecvTimeoutError::Disconnected) => break,
                 }
             }
