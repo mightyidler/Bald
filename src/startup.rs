@@ -1,3 +1,5 @@
+use std::process::{Command, Stdio};
+
 use anyhow::{Context, Result};
 use windows::{
     Win32::System::Registry::{
@@ -9,6 +11,64 @@ use windows::{
 
 const RUN_KEY: &str = "Software\\Microsoft\\Windows\\CurrentVersion\\Run";
 const VALUE_NAME: &str = "Bald";
+const ELEVATED_TASK_NAME: &str = "Bald Elevated";
+
+pub fn launch_elevated_task() -> Result<bool> {
+    let exists = Command::new("schtasks.exe")
+        .args(["/Query", "/TN", ELEVATED_TASK_NAME])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .context("query elevated Bald task")?
+        .success();
+    if !exists {
+        return Ok(false);
+    }
+    Ok(Command::new("schtasks.exe")
+        .args(["/Run", "/TN", ELEVATED_TASK_NAME])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .context("launch elevated Bald task")?
+        .success())
+}
+
+pub fn ensure_elevated_task() -> Result<()> {
+    use base64::{Engine, engine::general_purpose::STANDARD};
+
+    let executable = std::env::current_exe().context("resolve Bald executable")?;
+    let executable = executable.to_string_lossy().replace('\'', "''");
+    let script = format!(
+        "$a=New-ScheduledTaskAction -Execute '{executable}' -Argument '--elevated-task';\
+         $p=New-ScheduledTaskPrincipal -UserId $env:USERNAME -LogonType Interactive -RunLevel Highest;\
+         $s=New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -ExecutionTimeLimit ([TimeSpan]::Zero);\
+         Register-ScheduledTask -TaskName '{ELEVATED_TASK_NAME}' -Action $a -Principal $p -Settings $s -Force | Out-Null"
+    );
+    let encoded = STANDARD.encode(
+        script
+            .encode_utf16()
+            .flat_map(u16::to_le_bytes)
+            .collect::<Vec<_>>(),
+    );
+    let status = Command::new("powershell.exe")
+        .args([
+            "-NoProfile",
+            "-NonInteractive",
+            "-WindowStyle",
+            "Hidden",
+            "-EncodedCommand",
+            &encoded,
+        ])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .context("register elevated Bald task")?;
+    if !status.success() {
+        anyhow::bail!("register elevated Bald task failed: {status}");
+    }
+    Ok(())
+}
 
 pub fn set_enabled(enabled: bool) -> Result<()> {
     unsafe {

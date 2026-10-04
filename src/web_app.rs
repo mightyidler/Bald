@@ -8,7 +8,7 @@ use base64::{Engine, engine::general_purpose::STANDARD};
 use image::{DynamicImage, ImageFormat, RgbaImage};
 use serde::{Deserialize, Serialize};
 use tauri::{
-    Manager, State, WindowEvent,
+    AppHandle, Manager, State, WindowEvent,
     menu::{Menu, MenuItem},
     tray::{MouseButton, TrayIconBuilder, TrayIconEvent},
 };
@@ -57,6 +57,9 @@ fn status_name(status: &RuleStatus) -> &'static str {
         RuleStatus::NotRunning => "not_running",
         RuleStatus::Running => "running",
         RuleStatus::Borderless => "borderless",
+        RuleStatus::Failed(message) if message.contains("elevation_required") => {
+            "requires_elevation"
+        }
         RuleStatus::Failed(_) => "failed",
     }
 }
@@ -236,6 +239,37 @@ fn exit_app(app: tauri::AppHandle) {
 }
 
 #[tauri::command]
+fn restart_as_admin(app: AppHandle) -> Result<(), String> {
+    use windows::{
+        Win32::UI::{Shell::ShellExecuteW, WindowsAndMessaging::SW_SHOWNORMAL},
+        core::PCWSTR,
+    };
+    let executable = std::env::current_exe().map_err(|error| error.to_string())?;
+    let executable: Vec<u16> = executable
+        .as_os_str()
+        .to_string_lossy()
+        .encode_utf16()
+        .chain(Some(0))
+        .collect();
+    let operation: Vec<u16> = "runas\0".encode_utf16().collect();
+    let result = unsafe {
+        ShellExecuteW(
+            None,
+            PCWSTR(operation.as_ptr()),
+            PCWSTR(executable.as_ptr()),
+            None,
+            None,
+            SW_SHOWNORMAL,
+        )
+    };
+    if result.0 as isize <= 32 {
+        return Err(format!("elevation request failed: {}", result.0 as isize));
+    }
+    app.exit(0);
+    Ok(())
+}
+
+#[tauri::command]
 fn minimize_window(window: tauri::WebviewWindow) {
     let _ = window.minimize();
 }
@@ -259,7 +293,7 @@ fn set_window_height(window: tauri::WebviewWindow, height: f64) -> f64 {
         .unwrap_or_else(|| window.scale_factor().unwrap_or(1.0));
     let maximum = monitor
         .map(|monitor| monitor.work_area().size.height as f64 / scale - 32.0)
-        .unwrap_or(800.0);
+        .unwrap_or(720.0);
     let height = height.clamp(480.0, (maximum - 8.0).max(480.0));
     let physical_width = (488.0 * scale).round() as u32;
     let physical_height = ((height + 8.0) * scale).round() as u32;
@@ -305,13 +339,14 @@ pub fn run(instance: SingleInstance) -> anyhow::Result<()> {
     tauri::Builder::default()
         .plugin(tauri_plugin_updater::Builder::new().build())
         .setup(move |app| {
+            let _ = startup::ensure_elevated_task();
             if let Some(window) = app.get_webview_window("main") {
                 let _ = window.set_decorations(false);
                 let _ = window.set_shadow(false);
                 let scale = window.scale_factor().unwrap_or(1.0);
                 let _ = window.set_size(tauri::PhysicalSize::new(
                     (488.0 * scale).round() as u32,
-                    (800.0 * scale).round() as u32,
+                    (720.0 * scale).round() as u32,
                 ));
             }
             let config = Arc::new(RwLock::new(Config::load()));
@@ -386,6 +421,7 @@ pub fn run(instance: SingleInstance) -> anyhow::Result<()> {
             set_startup,
             reset_settings,
             exit_app,
+            restart_as_admin,
             minimize_window,
             close_window,
             start_window_drag,

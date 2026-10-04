@@ -1,4 +1,5 @@
 /target/
+/target-verify/
 /node_modules/
 /.reference/
 *.log

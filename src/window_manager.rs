@@ -9,7 +9,7 @@ use std::{
 
 use anyhow::{Result, bail};
 use windows::Win32::{
-    Foundation::{CloseHandle, HWND, LPARAM, POINT, RECT},
+    Foundation::{CloseHandle, GetLastError, HWND, LPARAM, POINT, RECT, SetLastError, WIN32_ERROR},
     Graphics::Gdi::ClientToScreen,
     System::Threading::{
         OpenProcess, PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION,
@@ -17,9 +17,10 @@ use windows::Win32::{
     },
     UI::WindowsAndMessaging::{
         EnumWindows, GW_OWNER, GWL_EXSTYLE, GWL_STYLE, GetClassNameW, GetClientRect, GetWindow,
-        GetWindowLongW, GetWindowRect, GetWindowTextW, GetWindowThreadProcessId, IsWindow,
-        IsWindowVisible, SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOZORDER, SetWindowLongW,
-        SetWindowPos, WS_BORDER, WS_CAPTION, WS_DLGFRAME, WS_EX_TOOLWINDOW, WS_THICKFRAME,
+        GetWindowLongW, GetWindowPlacement, GetWindowRect, GetWindowTextW,
+        GetWindowThreadProcessId, IsWindow, IsWindowVisible, SWP_FRAMECHANGED, SWP_NOACTIVATE,
+        SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, SetWindowLongW, SetWindowPlacement, SetWindowPos,
+        WINDOWPLACEMENT, WS_BORDER, WS_CAPTION, WS_DLGFRAME, WS_EX_TOOLWINDOW, WS_THICKFRAME,
     },
 };
 
@@ -31,6 +32,41 @@ pub struct ExecutableIcon {
 
 pub fn executable_icon(path: &str) -> Option<ExecutableIcon> {
     high_resolution_executable_icon(path).or_else(|| legacy_executable_icon(path))
+}
+
+fn crop_transparent_padding(icon: ExecutableIcon) -> ExecutableIcon {
+    let mut left = icon.width;
+    let mut top = icon.height;
+    let mut right = 0;
+    let mut bottom = 0;
+    for y in 0..icon.height {
+        for x in 0..icon.width {
+            if icon.rgba[((y * icon.width + x) * 4 + 3) as usize] > 8 {
+                left = left.min(x);
+                top = top.min(y);
+                right = right.max(x + 1);
+                bottom = bottom.max(y + 1);
+            }
+        }
+    }
+    if left >= right
+        || top >= bottom
+        || (left == 0 && top == 0 && right == icon.width && bottom == icon.height)
+    {
+        return icon;
+    }
+    let width = right - left;
+    let height = bottom - top;
+    let mut rgba = Vec::with_capacity((width * height * 4) as usize);
+    for y in top..bottom {
+        let start = ((y * icon.width + left) * 4) as usize;
+        rgba.extend_from_slice(&icon.rgba[start..start + (width * 4) as usize]);
+    }
+    ExecutableIcon {
+        width,
+        height,
+        rgba,
+    }
 }
 
 fn high_resolution_executable_icon(path: &str) -> Option<ExecutableIcon> {
@@ -107,11 +143,11 @@ fn high_resolution_executable_icon(path: &str) -> Option<ExecutableIcon> {
         for pixel in rgba.chunks_exact_mut(4) {
             pixel.swap(0, 2);
         }
-        Some(ExecutableIcon {
+        Some(crop_transparent_padding(ExecutableIcon {
             width,
             height,
             rgba,
-        })
+        }))
     }
 }
 
@@ -217,7 +253,7 @@ pub struct WindowController {
 #[derive(Debug, Clone, Copy)]
 struct OriginalWindowState {
     style: i32,
-    rect: RECT,
+    placement: WINDOWPLACEMENT,
 }
 
 impl WindowController {
@@ -237,6 +273,11 @@ impl WindowController {
             // area while still hit-testing against the old client origin.
             let mut window_rect = RECT::default();
             GetWindowRect(hwnd, &mut window_rect)?;
+            let mut placement = WINDOWPLACEMENT {
+                length: std::mem::size_of::<WINDOWPLACEMENT>() as u32,
+                ..Default::default()
+            };
+            GetWindowPlacement(hwnd, &mut placement)?;
             let mut client_rect = RECT::default();
             GetClientRect(hwnd, &mut client_rect)?;
             let mut client_origin = POINT {
@@ -253,9 +294,21 @@ impl WindowController {
                 .entry(hwnd_value)
                 .or_insert(OriginalWindowState {
                     style: current,
-                    rect: window_rect,
+                    placement,
                 });
-            SetWindowLongW(hwnd, GWL_STYLE, (current as u32 & !BORDER_STYLES) as i32);
+            SetLastError(WIN32_ERROR(0));
+            let previous =
+                SetWindowLongW(hwnd, GWL_STYLE, (current as u32 & !BORDER_STYLES) as i32);
+            if previous == 0 {
+                let error = GetLastError();
+                if error.0 != 0 {
+                    self.original_windows.lock().unwrap().remove(&hwnd_value);
+                    if error.0 == 5 {
+                        bail!("elevation_required");
+                    }
+                    bail!("SetWindowLongW failed: {}", error.0);
+                }
+            }
             SetWindowPos(
                 hwnd,
                 None,
@@ -284,15 +337,23 @@ impl WindowController {
             if !IsWindow(Some(hwnd)).as_bool() {
                 bail!("window no longer exists");
             }
-            SetWindowLongW(hwnd, GWL_STYLE, original.style);
+            SetLastError(WIN32_ERROR(0));
+            let previous = SetWindowLongW(hwnd, GWL_STYLE, original.style);
+            if previous == 0 {
+                let error = GetLastError();
+                if error.0 != 0 {
+                    bail!("restore SetWindowLongW failed: {}", error.0);
+                }
+            }
+            SetWindowPlacement(hwnd, &original.placement)?;
             SetWindowPos(
                 hwnd,
                 None,
-                original.rect.left,
-                original.rect.top,
-                original.rect.right - original.rect.left,
-                original.rect.bottom - original.rect.top,
-                SWP_FRAMECHANGED | SWP_NOZORDER | SWP_NOACTIVATE,
+                0,
+                0,
+                0,
+                0,
+                SWP_FRAMECHANGED | SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE,
             )?;
             self.original_windows.lock().unwrap().remove(&hwnd_value);
         }
@@ -377,6 +438,23 @@ fn process_path(pid: u32) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn crops_transparent_icon_canvas() {
+        let mut rgba = vec![0; 4 * 4 * 4];
+        for y in 1..3 {
+            for x in 1..3 {
+                rgba[((y * 4 + x) * 4 + 3) as usize] = 255;
+            }
+        }
+        let cropped = crop_transparent_padding(ExecutableIcon {
+            width: 4,
+            height: 4,
+            rgba,
+        });
+        assert_eq!((cropped.width, cropped.height), (2, 2));
+        assert_eq!(cropped.rgba.len(), 2 * 2 * 4);
+    }
 
     #[test]
     fn extracts_a_renderable_executable_icon() {

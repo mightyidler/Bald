@@ -1,4 +1,4 @@
-#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+#![cfg_attr(target_os = "windows", windows_subsystem = "windows")]
 
 mod config;
 mod i18n;
@@ -10,6 +10,10 @@ mod web_app;
 mod window_manager;
 
 fn main() -> anyhow::Result<()> {
+    let elevated_task = std::env::args().any(|argument| argument == "--elevated-task");
+    if !elevated_task && startup::launch_elevated_task()? {
+        return Ok(());
+    }
     let instance = single_instance::SingleInstance::acquire()?;
     if !instance.is_primary() {
         single_instance::show_existing();
