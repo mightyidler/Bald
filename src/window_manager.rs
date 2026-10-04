@@ -26,9 +26,9 @@ use windows::{
             EnumWindows, GA_ROOT, GW_OWNER, GWL_EXSTYLE, GWL_STYLE, GetAncestor, GetClassNameW,
             GetClientRect, GetPropW, GetWindow, GetWindowLongW, GetWindowPlacement, GetWindowRect,
             GetWindowTextW, GetWindowThreadProcessId, HTCAPTION, IsIconic, IsWindow,
-            IsWindowVisible, PostMessageW, RemovePropW, SWP_FRAMECHANGED, SWP_NOACTIVATE,
+            IsWindowVisible, PostMessageW, RemovePropW, SC_MOVE, SWP_FRAMECHANGED, SWP_NOACTIVATE,
             SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, SetPropW, SetWindowLongW, SetWindowPlacement,
-            SetWindowPos, WINDOWPLACEMENT, WM_NCLBUTTONDOWN, WS_BORDER, WS_CAPTION, WS_DLGFRAME,
+            SetWindowPos, WINDOWPLACEMENT, WM_SYSCOMMAND, WS_BORDER, WS_CAPTION, WS_DLGFRAME,
             WS_EX_TOOLWINDOW, WS_SYSMENU, WS_THICKFRAME, WindowFromPoint,
         },
     },
@@ -467,13 +467,12 @@ impl WindowController {
             return false;
         }
 
-        let coordinates = (cursor.x as u16 as u32) | ((cursor.y as u16 as u32) << 16);
         unsafe {
             PostMessageW(
                 Some(root),
-                WM_NCLBUTTONDOWN,
-                WPARAM(HTCAPTION as usize),
-                LPARAM(coordinates as isize),
+                WM_SYSCOMMAND,
+                WPARAM((SC_MOVE | HTCAPTION) as usize),
+                LPARAM(0),
             )
             .is_ok()
         }
