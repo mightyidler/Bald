@@ -21,15 +21,27 @@
         <div class="select-row"><strong data-i18n="theme">테마</strong><div class="dropdown-wrap" id="themeDropdown"><button class="dropdown-trigger"><span id="themeValue">시스템</span><img class="chevron" src="figma/chevron.svg" alt=""></button><div class="dropdown-menu"><button class="dropdown-item" data-theme="system"><span data-i18n="themeSystem">시스템</span><img class="check-icon" src="figma/check.svg" alt=""></button><button class="dropdown-item" data-theme="light"><span data-i18n="themeLight">라이트</span><img class="check-icon" src="figma/check.svg" alt=""></button><button class="dropdown-item" data-theme="dark"><span data-i18n="themeDark">다크</span><img class="check-icon" src="figma/check.svg" alt=""></button></div></div></div>
       </div></section>
       <section class="section"><div class="section-label" data-i18n="updates">업데이트</div><div class="card">
-        <div class="select-row"><strong data-i18n="currentVersion">현재 버전</strong><span class="version-value" id="appVersion">확인 중...</span></div>
-        <div class="divider inset"></div>
-        <button class="update-row" id="checkUpdateBtn"><span data-i18n="checkUpdate">업데이트 확인</span><span class="update-status" id="updateStatus"></span></button>
+        <div class="card-row">
+          <div class="row-label"><span class="row-title" data-i18n="currentVersion">현재 버전</span><span class="row-desc" id="appVersionText">버전 확인 중...</span></div>
+          <button class="btn btn--ghost" id="btnCheckUpdate" data-i18n="checkUpdate">업데이트 확인</button>
+        </div>
       </div></section>
     </div>
     <div class="action-card card"><button class="action danger" id="resetBtn" data-i18n="reset">설정 초기화</button><div class="divider inset"></div><button class="action" id="exitBtn" data-i18n="exit">Bald 종료</button></div>
   </main>
   <div class="overlay" id="overlay"></div>
   <div class="toast" id="toast" role="status" aria-live="polite"></div>
+  <div class="modal-overlay" id="resetModal" aria-hidden="true">
+    <div class="modal-card t-modal" role="dialog" aria-modal="true" aria-labelledby="resetModalTitle">
+      <div class="modal-header"><span class="modal-title" id="resetModalTitle" data-i18n="resetTitle">설정 초기화</span></div>
+      <div class="modal-body">
+        <p class="modal-text" data-i18n="resetDesc">모든 설정을 기본값으로 되돌리고 등록한 애플리케이션을 목록에서 제거합니다.</p>
+        <div class="modal-info-block"><span class="modal-info-label" data-i18n="resetTargetLabel">초기화 대상</span><p class="modal-info-text" data-i18n="resetTargetDesc">자동 적용, 시작 프로그램, 언어, 테마와 등록된 애플리케이션 설정이 초기화됩니다.</p></div>
+        <div class="modal-info-block"><span class="modal-info-label" data-i18n="resetSafetyLabel">안전 장치</span><p class="modal-info-text" data-i18n="resetSafetyDesc">현재 적용된 테두리는 복원되며 애플리케이션이나 개인 파일은 삭제되지 않습니다.</p></div>
+      </div>
+      <div class="modal-actions"><button class="btn btn--ghost" id="resetCancel" data-i18n="cancel">취소</button><button class="btn btn--red" id="resetConfirm" data-i18n="resetConfirm">설정 초기화</button></div>
+    </div>
+  </div>
   <div class="dim" id="dim"></div>
   <section class="picker" id="picker" aria-hidden="true">
     <div class="picker-fixed">
