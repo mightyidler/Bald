@@ -9,6 +9,10 @@ on:
 permissions:
   contents: write
 
+concurrency:
+  group: bald-release-${{ github.ref }}
+  cancel-in-progress: false
+
 jobs:
   release:
     runs-on: windows-latest
@@ -64,6 +68,10 @@ jobs:
       - name: Commit update manifest
         shell: bash
         run: |
+          cp update.json "$RUNNER_TEMP/update.json"
+          git fetch origin main
+          git checkout -B main origin/main
+          cp "$RUNNER_TEMP/update.json" update.json
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git add update.json
