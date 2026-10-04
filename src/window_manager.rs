@@ -31,7 +31,11 @@ pub struct ExecutableIcon {
 }
 
 pub fn executable_icon(path: &str) -> Option<ExecutableIcon> {
-    high_resolution_executable_icon(path).or_else(|| legacy_executable_icon(path))
+    // The shell image factory can return a thumbnail-style canvas for some games
+    // (notably Valorant), leaving the actual icon tiny in the center. The classic
+    // associated icon is the correct application icon and is large enough for the
+    // 36 px UI slot, so prefer it and keep the high-resolution path as a fallback.
+    legacy_executable_icon(path).or_else(|| high_resolution_executable_icon(path))
 }
 
 fn crop_transparent_padding(icon: ExecutableIcon) -> ExecutableIcon {
