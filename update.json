@@ -1,11 +1,11 @@
 {
-  "version": "0.1.4",
-  "notes": "Bald 0.1.4 업데이트",
-  "pub_date": "2026-10-09T22:08:52.355Z",
+  "version": "0.1.5",
+  "notes": "Bald 0.1.5 업데이트",
+  "pub_date": "2026-10-09T23:46:09.233Z",
   "platforms": {
     "windows-x86_64": {
-      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVSZEx5bXNwVFR4Zm84YTUyNDRpU0w1WHl0RHhVUGhSSis2K1BaQVFlYU1JYzY3TmZzWmNseEJIOTZ2TG1iU3ptK1lDOUR6dGlxd3Iva3AzYnN5MEY1UU85dVZuYVp4bXdrPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzkxNTgzNzI5CWZpbGU6QmFsZF8wLjEuNF94NjQtc2V0dXAuZXhlCXZlcnNpb246MC4xLjQKaEJ0Y1Z5QUI4MWQwRHFpc29yMmJBMVNtVjA0REYwQlhRUFJEeVVncm96M0NRSThuSWl5U2Y0dXh2UEhXUVdVenNaWlVkSEpENmk3bWRpdU1IQUd5RHc9PQo=",
-      "url": "https://github.com/mightyidler/Bald/releases/download/v0.1.4/Bald_0.1.4_x64-setup.exe"
+      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVSZEx5bXNwVFR4Zm9MMDU4cW1FdVNHTndaY2xUY1VVeXErVkM5RG5XUEdmdGZSVjh5aFQ3Z1FOd2hWL0xob2oyWVdLeUdRV0k3S2ZXOFNyK01xUnJhK2FWK0xoT1JZSWdvPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzkxNTg5NTU5CWZpbGU6QmFsZF8wLjEuNV94NjQtc2V0dXAuZXhlCXZlcnNpb246MC4xLjUKM0o5V080bGdySnJ6L05ySjNJRWhiNk8wamFLNmRoT0duR255OTB2ckJiNEdWYWFNaW5lUlB2RHY1QU95NGNVbkxIZ3duZjFhZ2RRZHlMYUhnNkU5QXc9PQo=",
+      "url": "https://github.com/mightyidler/Bald/releases/download/v0.1.5/Bald_0.1.5_x64-setup.exe"
     }
   }
 }
