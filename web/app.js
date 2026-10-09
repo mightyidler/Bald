@@ -349,7 +349,15 @@ function updateHeaderScroll(){
   $(".header").classList.toggle("is-scrolled", $(".main").scrollTop > 0);
 }
 
+function updatePickerScroll() {
+  $(".picker-surface").classList.toggle("is-scrolled", $("#pickerList").scrollTop > 0);
+}
+
 updateHeaderScroll();
+
+updatePickerScroll();
+
+$("#pickerList").addEventListener("scroll", updatePickerScroll, { passive: true });
 
 $("#overlay").addEventListener("click",closeMenus);
 
