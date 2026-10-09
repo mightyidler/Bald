@@ -386,7 +386,9 @@ fn minimize_window(window: tauri::WebviewWindow) -> Result<(), String> {
 #[tauri::command]
 fn close_window(window: tauri::WebviewWindow) -> Result<(), String> {
     sync_visible_window(&window)?;
-    window.hide().map_err(|error| error.to_string())
+    window.hide().map_err(|error| error.to_string())?;
+    let _ = window.eval("window.dispatchEvent(new Event('bald-window-hidden'))");
+    Ok(())
 }
 
 fn sync_visible_window(window: &tauri::WebviewWindow) -> Result<(), String> {
@@ -457,6 +459,11 @@ async fn install_background_update(app: tauri::AppHandle) {
 
 fn open_main_window(app: &AppHandle) {
     if let Some(window) = app.get_webview_window("main") {
+        let replay_content = !window.is_visible().unwrap_or(true)
+            && !window.is_minimized().unwrap_or(true);
+        if replay_content {
+            let _ = window.eval("window.dispatchEvent(new Event('bald-window-reopened'))");
+        }
         let _ = window.show();
         let _ = window.unminimize();
         let _ = window.set_focus();

@@ -1,5 +1,5 @@
 <!doctype html>
-<html lang="ko"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Bald</title><link rel="stylesheet" href="style.css"></head>
+<html lang="ko"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Bald</title><link rel="preload" href="figma/Pretendard-Regular.otf" as="font" type="font/otf" crossorigin><link rel="preload" href="figma/Pretendard-Medium.otf" as="font" type="font/otf" crossorigin><link rel="preload" href="figma/Pretendard-SemiBold.otf" as="font" type="font/otf" crossorigin><link rel="stylesheet" href="style.css"></head>
 <body>
 <div class="app" id="homePage">
   <div class="app-surface" aria-hidden="true"></div>
@@ -8,19 +8,19 @@
     <div class="header-actions"><button class="icon-btn" id="minimizeBtn"><img src="figma/minus.svg" alt="최소화"></button><button class="icon-btn" id="closeBtn"><img src="figma/close.svg" alt="닫기"></button></div>
   </header>
   <main class="main">
-    <div class="content-stack">
-      <section class="section"><div class="section-label" data-i18n="applications">애플리케이션</div><div class="card" id="applications"></div></section>
-      <section class="section"><div class="section-label" data-i18n="settings">동작</div><div class="card">
+    <div class="content-stack t-stagger" inert>
+      <section class="section t-stagger-line t-stagger-line--1"><div class="section-label" data-i18n="applications">애플리케이션</div><div class="card" id="applications"></div></section>
+      <section class="section t-stagger-line t-stagger-line--2"><div class="section-label" data-i18n="settings">동작</div><div class="card">
         <div class="setting-row"><div class="setting-copy"><strong data-i18n="automatic">테두리 자동 제거</strong><span data-i18n="automaticDesc">등록한 애플리케이션의 테두리를 자동으로 제거합니다</span></div><label class="toggle"><input id="automaticToggle" type="checkbox"><span class="toggle-track"></span><span class="toggle-knob"></span></label></div>
         <div class="divider inset"></div>
         <div class="setting-row"><div class="setting-copy"><strong data-i18n="startup">Windows 시작 시 Bald 실행</strong><span data-i18n="startupDesc">Windows에 로그인하면 Bald를 실행합니다</span></div><label class="toggle"><input id="startupToggle" type="checkbox"><span class="toggle-track"></span><span class="toggle-knob"></span></label></div>
       </div></section>
-      <section class="section"><div class="section-label" data-i18n="environment">개인 설정</div><div class="card">
-        <div class="select-row"><strong data-i18n="language">언어</strong><div class="dropdown-wrap" id="languageDropdown"><button class="dropdown-trigger"><span id="languageValue">한국어</span><img class="chevron" src="figma/chevron.svg" alt=""></button><div class="dropdown-menu"><button class="dropdown-item" data-language="korean">한국어<img class="check-icon" src="figma/check.svg" alt=""></button><button class="dropdown-item" data-language="english">English<img class="check-icon" src="figma/check.svg" alt=""></button></div></div></div>
+      <section class="section t-stagger-line t-stagger-line--3"><div class="section-label" data-i18n="environment">개인 설정</div><div class="card">
+        <div class="select-row"><strong data-i18n="language">언어</strong><div class="dropdown-wrap" id="languageDropdown"><button class="dropdown-trigger"><span id="languageValue">한국어</span><svg class="chevron" width="20" height="20" viewBox="0 0 20 20" fill="none" aria-hidden="true"><path d="M5 7.5L10 12.5L15 7.5" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg></button><div class="dropdown-menu"><button class="dropdown-item" data-language="korean">한국어<img class="check-icon" src="figma/check.svg" alt=""></button><button class="dropdown-item" data-language="english">English<img class="check-icon" src="figma/check.svg" alt=""></button></div></div></div>
         <div class="divider inset"></div>
-        <div class="select-row"><strong data-i18n="theme">테마</strong><div class="dropdown-wrap" id="themeDropdown"><button class="dropdown-trigger"><span id="themeValue">시스템</span><img class="chevron" src="figma/chevron.svg" alt=""></button><div class="dropdown-menu"><button class="dropdown-item" data-theme="system"><span data-i18n="themeSystem">시스템</span><img class="check-icon" src="figma/check.svg" alt=""></button><button class="dropdown-item" data-theme="light"><span data-i18n="themeLight">라이트 모드</span><img class="check-icon" src="figma/check.svg" alt=""></button><button class="dropdown-item" data-theme="dark"><span data-i18n="themeDark">다크 모드</span><img class="check-icon" src="figma/check.svg" alt=""></button></div></div></div>
+        <div class="select-row"><strong data-i18n="theme">테마</strong><div class="dropdown-wrap" id="themeDropdown"><button class="dropdown-trigger"><span id="themeValue">시스템</span><svg class="chevron" width="20" height="20" viewBox="0 0 20 20" fill="none" aria-hidden="true"><path d="M5 7.5L10 12.5L15 7.5" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg></button><div class="dropdown-menu"><button class="dropdown-item" data-theme="system"><span data-i18n="themeSystem">시스템</span><img class="check-icon" src="figma/check.svg" alt=""></button><button class="dropdown-item" data-theme="light"><span data-i18n="themeLight">라이트 모드</span><img class="check-icon" src="figma/check.svg" alt=""></button><button class="dropdown-item" data-theme="dark"><span data-i18n="themeDark">다크 모드</span><img class="check-icon" src="figma/check.svg" alt=""></button></div></div></div>
       </div></section>
-      <section class="section"><div class="section-label" data-i18n="updates">업데이트</div><div class="card">
+      <section class="section t-stagger-line t-stagger-line--4"><div class="section-label" data-i18n="updates">업데이트</div><div class="card">
         <div class="card-row">
           <div class="row-label"><span class="row-title" data-i18n="currentVersion">현재 버전</span><span class="row-desc" id="appVersionText">버전 확인 중...</span></div>
           <button class="btn btn--ghost" id="btnCheckUpdate" data-i18n="checkUpdate">업데이트 확인</button>
