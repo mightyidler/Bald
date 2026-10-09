@@ -341,8 +341,8 @@ async function revealContent() {
   }));
 }
 
-window.addEventListener("bald-window-hidden", prepareContentReveal);
-
+// Keep content ready while the native window is hidden; Explorer can reopen
+// the existing instance without emitting bald-window-reopened.
 window.addEventListener("bald-window-reopened", revealContent);
 
 function updateHeaderScroll(){

@@ -387,7 +387,6 @@ fn minimize_window(window: tauri::WebviewWindow) -> Result<(), String> {
 fn close_window(window: tauri::WebviewWindow) -> Result<(), String> {
     sync_visible_window(&window)?;
     window.hide().map_err(|error| error.to_string())?;
-    let _ = window.eval("window.dispatchEvent(new Event('bald-window-hidden'))");
     Ok(())
 }
 

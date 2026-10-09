@@ -1,6 +1,6 @@
 [package]
 name = "bald"
-version = "0.1.4"
+version = "0.1.5"
 edition = "2024"
 license = "GPL-3.0-only"
 description = "A quiet Windows tray utility that removes borders from selected applications"

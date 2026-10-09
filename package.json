@@ -1,6 +1,6 @@
 {
   "name": "bald",
-  "version": "0.1.4",
+  "version": "0.1.5",
   "private": true,
   "scripts": {
     "dev": "tauri dev",
@@ -8,6 +8,7 @@
     "build:unsigned": "tauri build",
     "release": "node bump-and-push.js",
     "tauri": "tauri",
+    "verify:installer": "pwsh -NoProfile -File tools/windows/verify-installer.ps1",
     "lint": "oxlint web build-signed.js bump-and-push.js publish-update.js"
   },
   "devDependencies": {

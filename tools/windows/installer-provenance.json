@@ -1,0 +1,15 @@
+{
+  "repository": "https://github.com/tauri-apps/tauri",
+  "ref": "tauri-cli-v2.12.1",
+  "commit": "30da1fd6e17de6107ecc850c95dfb16b5729f2dd",
+  "source": "crates/tauri-bundler/src/bundle/windows/nsis/installer.nsi",
+  "sha256": "DABED59013B1D78B879A1A85BC7F2EED2993B33A9A90CDABE5946DE3D3950597",
+  "license": "MIT OR Apache-2.0",
+  "changes": [
+    "Preserve existing Start menu and Desktop shortcuts before any migration/save",
+    "Explicit installed ICO index 0 and working directory matching successful BALD shortcut",
+    "Restore missing Start shortcut during update",
+    "Persist /NS preference for updates",
+    "Pass /UPDATE to old uninstaller during version upgrades"
+  ]
+}

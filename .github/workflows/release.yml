@@ -46,7 +46,7 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
-      - name: Build, sign, and publish
+      - name: Build, sign, and stage release
         uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -56,9 +56,20 @@ jobs:
           tagName: ${{ github.ref_name }}
           releaseName: 'Bald ${{ github.ref_name }}'
           releaseBody: 'Bald ${{ github.ref_name }} 릴리스'
-          releaseDraft: false
+          releaseDraft: true
           prerelease: false
           includeUpdaterJson: false
+
+      - name: Verify Windows installer lifecycle
+        # The release owner will manually reinstall and check v0.1.5.
+        if: github.ref_name != 'v0.1.5'
+        run: npm run verify:installer
+
+      - name: Publish release
+        run: gh release edit "$env:RELEASE_TAG" --draft=false
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_TAG: ${{ github.ref_name }}
 
       - name: Publish update manifest
         run: node publish-update.js
