@@ -1,5 +1,5 @@
 use std::{
-    collections::HashMap,
+    collections::{HashMap, VecDeque},
     sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering},
     sync::{Arc, Mutex, OnceLock, RwLock, mpsc},
     thread,
@@ -12,8 +12,9 @@ use windows::Win32::{
     UI::{
         Accessibility::{HWINEVENTHOOK, SetWinEventHook, UnhookWinEvent},
         WindowsAndMessaging::{
-            CallNextHookEx, DispatchMessageW, EVENT_OBJECT_CREATE, EVENT_OBJECT_LOCATIONCHANGE,
-            EVENT_OBJECT_SHOW, EVENT_SYSTEM_MOVESIZEEND, GetMessageW, KillTimer, MSG,
+            CallNextHookEx, DispatchMessageW, EVENT_OBJECT_CREATE, EVENT_OBJECT_HIDE,
+            EVENT_OBJECT_LOCATIONCHANGE, EVENT_SYSTEM_MINIMIZEEND, EVENT_SYSTEM_MINIMIZESTART,
+            EVENT_SYSTEM_MOVESIZEEND, GetMessageW, GetWindowThreadProcessId, KillTimer, MSG,
             MSLLHOOKSTRUCT, OBJID_WINDOW, PM_NOREMOVE, PeekMessageW, PostThreadMessageW, SetTimer,
             SetWindowsHookExW, TranslateMessage, UnhookWindowsHookEx, WH_MOUSE_LL,
             WINEVENT_OUTOFCONTEXT, WINEVENT_SKIPOWNPROCESS, WM_APP, WM_LBUTTONDOWN, WM_LBUTTONUP,
@@ -47,6 +48,16 @@ pub struct Watcher {
 }
 
 static WINDOW_EVENT_WAKE: OnceLock<Mutex<Option<mpsc::Sender<()>>>> = OnceLock::new();
+#[derive(Clone, Copy)]
+struct WindowEvent {
+    hwnd: isize,
+    event: u32,
+    pid: u32,
+    tick: u32,
+    received_us: u128,
+}
+static WINDOW_EVENTS: Mutex<VecDeque<WindowEvent>> = Mutex::new(VecDeque::new());
+static TRACKED_WINDOWS: OnceLock<Mutex<HashMap<isize, u32>>> = OnceLock::new();
 static MOUSE_CONTROLLER: OnceLock<WindowController> = OnceLock::new();
 #[derive(Clone, Copy)]
 enum DragEvent {
@@ -134,31 +145,46 @@ unsafe extern "system" fn window_event_callback(
     event: u32,
     hwnd: HWND,
     object_id: i32,
-    _child_id: i32,
+    child_id: i32,
     _thread_id: u32,
-    _event_time: u32,
+    event_time: u32,
 ) {
-    if hwnd.0.is_null() || object_id != OBJID_WINDOW.0 {
+    if hwnd.0.is_null() || object_id != OBJID_WINDOW.0 || child_id != 0 {
         return;
     }
-    if event == EVENT_SYSTEM_MOVESIZEEND {
-        crate::diagnostics::record(format!("native_move_finished hwnd={:x}", hwnd.0 as isize));
-        if let Some(sender) = WINDOW_EVENT_WAKE
-            .get()
-            .and_then(|value| value.lock().ok())
-            .and_then(|value| value.clone())
-        {
-            request_scan(&sender);
-        }
-        return;
-    }
+    // Out-of-context callbacks only queue identity and event metadata. Geometry,
+    // DWM queries and file writes belong to the scanner, never this callback.
     if event == EVENT_OBJECT_LOCATIONCHANGE
-        && !MOUSE_CONTROLLER
-            .get()
-            .is_some_and(|controller| controller.managed_game_size_changed(hwnd.0 as isize))
+        && (USER_DRAG_ACTIVE.load(Ordering::Acquire)
+            || !TRACKED_WINDOWS
+                .get()
+                .is_some_and(|tracked| tracked.lock().unwrap().contains_key(&(hwnd.0 as isize))))
     {
         return;
     }
+    let mut pid = 0;
+    unsafe {
+        GetWindowThreadProcessId(hwnd, Some(&mut pid));
+    }
+    if pid == 0 {
+        pid = TRACKED_WINDOWS
+            .get()
+            .and_then(|tracked| tracked.lock().unwrap().get(&(hwnd.0 as isize)).copied())
+            .unwrap_or(0);
+    }
+    let mut events = WINDOW_EVENTS.lock().unwrap();
+    // Bound global event bursts while retaining order for lifecycle transitions.
+    if events.len() == 256 {
+        events.pop_front();
+    }
+    events.push_back(WindowEvent {
+        hwnd: hwnd.0 as isize,
+        event,
+        pid,
+        tick: event_time,
+        received_us: crate::diagnostics::monotonic_us(),
+    });
+    drop(events);
     if let Some(sender) = WINDOW_EVENT_WAKE
         .get_or_init(|| Mutex::new(None))
         .lock()
@@ -402,7 +428,7 @@ impl Watcher {
             let hook = unsafe {
                 SetWinEventHook(
                     EVENT_OBJECT_CREATE,
-                    EVENT_OBJECT_SHOW,
+                    EVENT_OBJECT_HIDE,
                     None,
                     Some(window_event_callback),
                     0,
@@ -425,6 +451,17 @@ impl Watcher {
                 SetWinEventHook(
                     EVENT_OBJECT_LOCATIONCHANGE,
                     EVENT_OBJECT_LOCATIONCHANGE,
+                    None,
+                    Some(window_event_callback),
+                    0,
+                    0,
+                    WINEVENT_OUTOFCONTEXT | WINEVENT_SKIPOWNPROCESS,
+                )
+            };
+            let minimize_hook = unsafe {
+                SetWinEventHook(
+                    EVENT_SYSTEM_MINIMIZESTART,
+                    EVENT_SYSTEM_MINIMIZEEND,
                     None,
                     Some(window_event_callback),
                     0,
@@ -467,6 +504,11 @@ impl Watcher {
             if !size_hook.0.is_null() {
                 unsafe {
                     let _ = UnhookWinEvent(size_hook);
+                }
+            }
+            if !minimize_hook.0.is_null() {
+                unsafe {
+                    let _ = UnhookWinEvent(minimize_hook);
                 }
             }
             if !move_end_hook.0.is_null() {
@@ -527,21 +569,69 @@ fn scan(
     // Hold the read guard for the complete scan. Configuration mutations then wait
     // for an in-flight apply to finish before disabling a rule and restoring frames.
     let snapshot = config.read().unwrap();
+    let events: Vec<_> = WINDOW_EVENTS.lock().unwrap().drain(..).collect();
+    let tracked = TRACKED_WINDOWS.get_or_init(|| Mutex::new(HashMap::new()));
+    // This validates PID and ownership markers, including HWND reuse within a PID.
+    controller.managed_windows();
     controller.record_diagnostics();
     if snapshot.applications.is_empty() {
+        tracked.lock().unwrap().clear();
         controller.configure_drag_rules(Vec::new());
         update_drag_hook(false);
         statuses.write().unwrap().clear();
         return;
     }
     let windows = enumerate_windows();
+    let next_tracked: HashMap<_, _> = windows
+        .iter()
+        .filter(|window| {
+            snapshot
+                .applications
+                .iter()
+                .any(|rule| rule.matches_automatic_window(window))
+        })
+        .map(|window| {
+            let mut pid = 0;
+            unsafe {
+                GetWindowThreadProcessId(HWND(window.hwnd as *mut _), Some(&mut pid));
+            }
+            (window.hwnd, pid)
+        })
+        .collect();
+    if cfg!(debug_assertions) || crate::diagnostics::enabled() {
+        let previous = tracked.lock().unwrap();
+        for event in events {
+            if previous.get(&event.hwnd) == Some(&event.pid)
+                || next_tracked.get(&event.hwnd) == Some(&event.pid)
+            {
+                crate::window_manager::trace_window_event(
+                    event.hwnd,
+                    event.event,
+                    event.pid,
+                    event.tick,
+                    event.received_us,
+                );
+            }
+        }
+        for (&hwnd, &pid) in previous.iter() {
+            if next_tracked.get(&hwnd) != Some(&pid) {
+                crate::window_manager::trace_window_selection(hwnd, false);
+            }
+        }
+        for (&hwnd, &pid) in &next_tracked {
+            if previous.get(&hwnd) != Some(&pid) {
+                crate::window_manager::trace_window_selection(hwnd, true);
+            }
+        }
+    }
+    *tracked.lock().unwrap() = next_tracked;
     let drag_rules = windows
         .iter()
         .filter_map(|window| {
             snapshot
                 .applications
                 .iter()
-                .find(|rule| rule.enabled && rule.matches(window))
+                .find(|rule| rule.enabled && rule.matches_automatic_window(window))
                 .map(|rule| (window.hwnd, rule.drag_mode))
         })
         .collect();
@@ -550,7 +640,7 @@ fn scan(
     for rule in &snapshot.applications {
         let matches: Vec<_> = windows
             .iter()
-            .filter(|window| rule.matches(window))
+            .filter(|window| rule.matches_automatic_window(window))
             .collect();
         let status = if matches.is_empty() {
             RuleStatus::NotRunning

@@ -59,3 +59,12 @@ pub fn record_frame(value: serde_json::Value) {
         let _ = writeln!(file, "{value}");
     }
 }
+
+// Shared clock for event receipt and deferred window-operation snapshots.
+pub fn monotonic_us() -> u128 {
+    static START: OnceLock<std::time::Instant> = OnceLock::new();
+    START
+        .get_or_init(std::time::Instant::now)
+        .elapsed()
+        .as_micros()
+}

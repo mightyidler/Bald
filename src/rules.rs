@@ -46,6 +46,12 @@ impl ApplicationRule {
             && self.class_matches_when_needed(window)
     }
 
+    // An exact executable path may also own splash/launcher windows. Automatic
+    // application uses the registered class; manual restore keeps process scope.
+    pub fn matches_automatic_window(&self, window: &WindowInfo) -> bool {
+        self.matches(window) && self.class_matches_when_needed(window)
+    }
+
     fn class_matches_when_needed(&self, window: &WindowInfo) -> bool {
         self.window_class_hint
             .as_ref()
@@ -112,6 +118,23 @@ mod tests {
             Some("c:/games/example.exe"),
             "Example.exe",
             "OtherClass"
+        )));
+    }
+
+    #[test]
+    fn automatic_application_excludes_same_process_splash_class() {
+        let rule = ApplicationRule::from_window(&window(
+            Some(r"C:\Games\Example.exe"),
+            "Example.exe",
+            "GameWindow",
+        ));
+        let splash = window(Some(r"C:\Games\Example.exe"), "Example.exe", "SplashWindow");
+        assert!(rule.matches(&splash));
+        assert!(!rule.matches_automatic_window(&splash));
+        assert!(rule.matches_automatic_window(&window(
+            Some("c:/games/example.exe"),
+            "Example.exe",
+            "GameWindow",
         )));
     }
 

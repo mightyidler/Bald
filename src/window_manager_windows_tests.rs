@@ -190,6 +190,19 @@ unsafe extern "system" fn fixture_proc(
     wparam: WPARAM,
     lparam: LPARAM,
 ) -> windows::Win32::Foundation::LRESULT {
+    if message == windows::Win32::UI::WindowsAndMessaging::WM_WINDOWPOSCHANGED
+        && unsafe { (*(lparam.0 as *const WINDOWPOS)).flags.0 & SWP_FRAMECHANGED.0 != 0 }
+    {
+        unsafe {
+            let count = GetPropW(hwnd, w!("Bald.TestFrameChangeCount")).0 as usize;
+            SetPropW(
+                hwnd,
+                w!("Bald.TestFrameChangeCount"),
+                Some(HANDLE((count + 1) as *mut c_void)),
+            )
+            .unwrap();
+        }
+    }
     if message == windows::Win32::UI::WindowsAndMessaging::WM_GETTEXT {
         unsafe {
             let count = GetPropW(hwnd, w!("Bald.TestTitleRequests")).0 as usize;
@@ -1173,6 +1186,44 @@ fn native_region_preserves_styles_content_and_restores_each_cycle() {
 }
 
 #[test]
+fn native_clip_repair_does_not_rebuild_unchanged_paint_policy() {
+    with_pumped_maple_fixture(|window| {
+        let controller = WindowController::default();
+        assert!(controller.make_borderless(window.value()).unwrap());
+        let style = unsafe { GetWindowLongW(window.0, GWL_STYLE) };
+        let mut client = RECT::default();
+        unsafe {
+            GetClientRect(window.0, &mut client).unwrap();
+            // Simulate an owner replacing its clip during restore without changing
+            // styles or the disabled DWM paint policy.
+            assert_ne!(SetWindowRgn(window.0, None, false), 0);
+        }
+        assert_eq!(native_frame_rendering(window.0), Some(false));
+        let before = unsafe { GetPropW(window.0, w!("Bald.TestFrameChangeCount")).0 as usize };
+        assert!(controller.make_borderless(window.value()).unwrap());
+        let after = unsafe { GetPropW(window.0, w!("Bald.TestFrameChangeCount")).0 as usize };
+        assert_eq!(
+            after,
+            before + 1,
+            "only SetWindowRgn should recalculate the clip"
+        );
+        assert!(!controller.make_borderless(window.value()).unwrap());
+        assert_eq!(
+            unsafe { GetPropW(window.0, w!("Bald.TestFrameChangeCount")).0 as usize },
+            after
+        );
+        assert_eq!(unsafe { GetWindowLongW(window.0, GWL_STYLE) }, style);
+        let surface = controller.drag_surface(window.0).unwrap();
+        assert_eq!(
+            (surface.right - surface.left, surface.bottom - surface.top),
+            (client.right, client.bottom)
+        );
+        controller.restore_all_borders().unwrap();
+        assert_eq!(native_frame_rendering(window.0), Some(true));
+    });
+}
+
+#[test]
 fn maple_application_path_preserves_styles_and_restores_modern_rendering() {
     with_pumped_maple_fixture(|window| {
         let controller = WindowController::default();
@@ -1764,4 +1815,38 @@ fn clipped_minimized_game_keeps_visibility_and_restore_content_size() {
     }
     let restored = window.client();
     assert_eq!((restored.0, restored.1), (before.0, before.1));
+}
+
+#[test]
+fn automatic_application_skips_hidden_startup_window_without_mutating_it() {
+    let window = Fixture::new(WS_OVERLAPPEDWINDOW);
+    unsafe {
+        let _ = ShowWindow(window.0, SW_HIDE);
+    }
+    let before_style = unsafe { GetWindowLongW(window.0, GWL_STYLE) };
+    let before_ex = unsafe { GetWindowLongW(window.0, GWL_EXSTYLE) };
+    let before_client = window.client();
+    let controller = WindowController::default();
+    assert!(!controller.make_borderless(window.value()).unwrap());
+    assert_eq!(unsafe { GetWindowLongW(window.0, GWL_STYLE) }, before_style);
+    assert_eq!(unsafe { GetWindowLongW(window.0, GWL_EXSTYLE) }, before_ex);
+    assert_eq!(
+        (window.client().0, window.client().1),
+        (before_client.0, before_client.1)
+    );
+    assert!(!unsafe { IsWindowVisible(window.0).as_bool() });
+    assert!(controller.managed_windows().is_empty());
+    let region = unsafe { CreateRectRgn(0, 0, 0, 0) };
+    assert_eq!(unsafe { GetWindowRgn(window.0, region).0 }, 0);
+    unsafe {
+        let _ = DeleteObject(region.into());
+    }
+    // Once the owner shows it, the existing automatic path can apply normally.
+    unsafe {
+        let _ = ShowWindow(window.0, SW_SHOWNOACTIVATE);
+    }
+    assert!(controller.make_borderless(window.value()).unwrap());
+    assert!(unsafe { IsWindowVisible(window.0).as_bool() });
+    controller.restore_all_borders().unwrap();
+    assert!(unsafe { IsWindowVisible(window.0).as_bool() });
 }
