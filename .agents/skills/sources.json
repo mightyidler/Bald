@@ -1,0 +1,22 @@
+[
+  {
+    "source": "alexgreensh/attention-span",
+    "path": "skills/attention-kind",
+    "commit": "2714c965e6be1fa2597510e66651e63bc67cb448"
+  },
+  {
+    "source": "multica-ai/andrej-karpathy-skills",
+    "path": "skills/karpathy-guidelines",
+    "commit": "2c606141936f1eeef17fa3043a72095b4765b9c2"
+  },
+  {
+    "source": "dmmulroy/anti-slop",
+    "path": "skills/install-anti-slop",
+    "commit": "c44ef22ca116d0ba62a3ff663a0bd13a3f3fa40b"
+  },
+  {
+    "source": "obra/superpowers",
+    "path": "skills/verification-before-completion",
+    "commit": "8ca22dba9a94f28898bbce59f2537ff4d87c747d"
+  }
+]

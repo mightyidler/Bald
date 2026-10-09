@@ -16,33 +16,28 @@ use tauri_plugin_updater::UpdaterExt;
 use uuid::Uuid;
 
 use crate::{
+    border_service::BorderService,
     config::Config,
     i18n::Language,
-    rules::ApplicationRule,
+    rules::{ApplicationRule, DragMode},
     single_instance::SingleInstance,
     startup,
-    watcher::{RuleStatus, Watcher},
-    window_manager::{WindowController, enumerate_windows, executable_icon},
+    watcher::RuleStatus,
+    window_manager::{enumerate_windows, executable_icon},
 };
 
 struct AppState {
     config: Arc<RwLock<Config>>,
-    statuses: Arc<RwLock<HashMap<Uuid, RuleStatus>>>,
-    controller: WindowController,
-    _watcher: Watcher,
+    service: Arc<Mutex<BorderService>>,
     icon_cache: Mutex<HashMap<String, String>>,
 }
 
 impl AppState {
     fn restore_before_exit(&self) {
-        if !self.controller.begin_shutdown() {
-            return;
+        if let Err(error) = self.service.lock().unwrap().shutdown() {
+            crate::diagnostics::record(format!("exit_restore_failed {error}"));
+            eprintln!("{error}");
         }
-        // A scan holds the matching read lock until it finishes applying styles.
-        // Taking the write lock here waits for that work and prevents a late scan
-        // from making a restored window borderless again during shutdown.
-        let _config = self.config.write().unwrap();
-        self.controller.restore_all_borders();
     }
 }
 
@@ -108,12 +103,23 @@ fn cached_icon_data_url(state: &AppState, path: Option<&str>) -> Option<String> 
 }
 
 #[tauri::command]
-fn get_state(state: State<'_, AppState>) -> UiState {
+async fn get_state(app: AppHandle) -> Result<UiState, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<AppState>();
+        read_ui_state(&state)
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
+fn read_ui_state(state: &AppState) -> Result<UiState, String> {
     let config = state.config.read().unwrap().clone();
     let statuses = state
-        .statuses
-        .read()
+        .service
+        .lock()
         .unwrap()
+        .statuses()
+        .map_err(|error| error.to_string())?
         .iter()
         .map(|(id, value)| (id.to_string(), status_name(value).to_owned()))
         .collect();
@@ -121,16 +127,16 @@ fn get_state(state: State<'_, AppState>) -> UiState {
         .applications
         .iter()
         .filter_map(|rule| {
-            cached_icon_data_url(&state, rule.executable_path.as_deref())
+            cached_icon_data_url(state, rule.executable_path.as_deref())
                 .map(|icon| (rule.id.to_string(), icon))
         })
         .collect();
-    UiState {
+    Ok(UiState {
         config,
         statuses,
         application_icons,
         startup_enabled: state.config.read().unwrap().startup_enabled,
-    }
+    })
 }
 
 #[tauri::command]
@@ -147,50 +153,72 @@ fn list_windows(state: State<'_, AppState>) -> Vec<WindowChoice> {
         .collect()
 }
 
-fn persist(state: &AppState) -> Result<(), String> {
-    state
+async fn persist(state: &AppState) -> Result<(), String> {
+    let saved = state
         .config
         .read()
         .unwrap()
         .save()
-        .map_err(|error| error.to_string())?;
-    state._watcher.notify();
-    Ok(())
+        .map_err(|error| error.to_string());
+    let config = state.config.clone();
+    let service = state.service.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let mut service = service.lock().unwrap();
+        let snapshot = config.read().unwrap().clone();
+        service.sync(snapshot)
+    })
+    .await
+    .map_err(|error| error.to_string())?
+    .map_err(|error| error.to_string())?;
+    saved
 }
 
-fn restore_rule_windows(rule: &ApplicationRule, state: &AppState) {
-    for window in enumerate_windows()
-        .iter()
-        .filter(|window| rule.matches(window))
-    {
-        let _ = state.controller.restore_borders(window.hwnd);
-    }
+async fn restore_in_background(
+    service: Arc<Mutex<BorderService>>,
+    config: Arc<RwLock<Config>>,
+    rule: Option<ApplicationRule>,
+) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let mut service = service.lock().unwrap();
+        let snapshot = config.read().unwrap().clone();
+        service.sync(snapshot)?;
+        service.restore(rule)
+    })
+    .await
+    .map_err(|error| error.to_string())?
+    .map_err(|error| error.to_string())
+}
+
+async fn restore_rule_windows(rule: &ApplicationRule, state: &AppState) -> Result<(), String> {
+    let config = state.config.clone();
+    restore_in_background(state.service.clone(), config, Some(rule.clone())).await
 }
 
 #[tauri::command]
-fn add_application(choice: WindowChoice, state: State<'_, AppState>) -> Result<(), String> {
+async fn add_application(choice: WindowChoice, state: State<'_, AppState>) -> Result<(), String> {
     let window = enumerate_windows()
         .into_iter()
         .find(|window| {
             window.title == choice.title && window.executable_name == choice.executable_name
         })
         .ok_or_else(|| "window is no longer available".to_owned())?;
-    let mut config = state.config.write().unwrap();
-    if !config
-        .applications
-        .iter()
-        .any(|rule| rule.duplicates(&window))
     {
-        config
+        let mut config = state.config.write().unwrap();
+        if !config
             .applications
-            .push(ApplicationRule::from_window(&window));
+            .iter()
+            .any(|rule| rule.duplicates(&window))
+        {
+            config
+                .applications
+                .push(ApplicationRule::from_window(&window));
+        }
     }
-    drop(config);
-    persist(&state)
+    persist(&state).await
 }
 
 #[tauri::command]
-fn remove_application(id: String, state: State<'_, AppState>) -> Result<(), String> {
+async fn remove_application(id: String, state: State<'_, AppState>) -> Result<(), String> {
     let id = Uuid::parse_str(&id).map_err(|error| error.to_string())?;
     let rule = state
         .config
@@ -206,58 +234,90 @@ fn remove_application(id: String, state: State<'_, AppState>) -> Result<(), Stri
         .unwrap()
         .applications
         .retain(|rule| rule.id != id);
-    persist(&state)?;
-    if let Some(rule) = rule {
-        restore_rule_windows(&rule, &state);
-    }
-    Ok(())
+    let restored = if let Some(rule) = rule.as_ref() {
+        restore_rule_windows(rule, &state).await
+    } else {
+        Ok(())
+    };
+    let saved = persist(&state).await;
+    restored.and(saved)
 }
 
 #[tauri::command]
-fn set_automatic(enabled: bool, state: State<'_, AppState>) -> Result<(), String> {
-    let rules = state.config.read().unwrap().applications.clone();
+async fn set_application_drag_mode(
+    id: String,
+    mode: DragMode,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
+    let id = Uuid::parse_str(&id).map_err(|error| error.to_string())?;
+    let config = state.config.clone();
+    let service = state.service.clone();
+    let result = tauri::async_runtime::spawn_blocking(move || {
+        // Serialize configuration and native requests off the WebView thread.
+        let mut service = service.lock().unwrap();
+        let mut config = config.write().unwrap();
+        let rule = config
+            .applications
+            .iter_mut()
+            .find(|rule| rule.id == id)
+            .ok_or_else(|| "application no longer registered".to_owned())?;
+        rule.drag_mode = mode;
+        let rule = rule.clone();
+        config.save().map_err(|error| error.to_string())?;
+        let snapshot = config.clone();
+        drop(config);
+        service.sync(snapshot).map_err(|error| error.to_string())?;
+        service.drag(rule).map_err(|error| error.to_string())?;
+        Ok(())
+    })
+    .await
+    .map_err(|error| error.to_string())?;
+    result
+}
+
+#[tauri::command]
+async fn set_automatic(enabled: bool, state: State<'_, AppState>) -> Result<(), String> {
     state.config.write().unwrap().automatic_application = enabled;
-    persist(&state)?;
-    if !enabled {
-        for rule in &rules {
-            restore_rule_windows(rule, &state);
-        }
-    }
-    Ok(())
+    let restored = if !enabled {
+        let config = state.config.clone();
+        restore_in_background(state.service.clone(), config, None).await
+    } else {
+        Ok(())
+    };
+    let saved = persist(&state).await;
+    restored.and(saved)
 }
 
 #[tauri::command]
-fn set_language(language: Language, state: State<'_, AppState>) -> Result<(), String> {
+async fn set_language(language: Language, state: State<'_, AppState>) -> Result<(), String> {
     state.config.write().unwrap().language = language;
-    persist(&state)
+    persist(&state).await
 }
 
 #[tauri::command]
-fn set_theme(theme: String, state: State<'_, AppState>) -> Result<(), String> {
+async fn set_theme(theme: String, state: State<'_, AppState>) -> Result<(), String> {
     if !matches!(theme.as_str(), "system" | "light" | "dark") {
         return Err("unsupported theme".to_owned());
     }
     state.config.write().unwrap().theme = theme;
-    persist(&state)
+    persist(&state).await
 }
 
 #[tauri::command]
-fn set_startup(enabled: bool, state: State<'_, AppState>) -> Result<(), String> {
+async fn set_startup(enabled: bool, state: State<'_, AppState>) -> Result<(), String> {
     startup::set_enabled(enabled).map_err(|error| error.to_string())?;
     state.config.write().unwrap().startup_enabled = enabled;
-    persist(&state)
+    persist(&state).await
 }
 
 #[tauri::command]
-fn reset_settings(state: State<'_, AppState>) -> Result<(), String> {
-    let rules = state.config.read().unwrap().applications.clone();
+async fn reset_settings(state: State<'_, AppState>) -> Result<(), String> {
     *state.config.write().unwrap() = Config::default();
-    persist(&state)?;
-    for rule in &rules {
-        restore_rule_windows(rule, &state);
-    }
-    let _ = startup::set_enabled(true);
-    Ok(())
+    let config = state.config.clone();
+    let restored = restore_in_background(state.service.clone(), config, None).await;
+    let saved = persist(&state).await;
+    let startup = startup::set_enabled(true).map_err(|error| error.to_string());
+    restored.and(saved).and(startup)
 }
 
 #[tauri::command]
@@ -267,36 +327,49 @@ fn exit_app(app: tauri::AppHandle, state: State<'_, AppState>) {
 }
 
 #[tauri::command]
-fn restart_as_admin(app: AppHandle) -> Result<(), String> {
-    use windows::{
-        Win32::UI::{Shell::ShellExecuteW, WindowsAndMessaging::SW_HIDE},
-        core::PCWSTR,
-    };
-    if let Some(window) = app.get_webview_window("main") {
-        let _ = window.hide();
+async fn elevate_border_service(state: State<'_, AppState>) -> Result<(), String> {
+    let service = state.service.clone();
+    let config = state.config.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let mut service = service.lock().unwrap();
+        let snapshot = config.read().unwrap().clone();
+        service.elevate(snapshot)
+    })
+    .await
+    .map_err(|error| error.to_string())?
+    .map_err(|error| error.to_string())
+}
+
+fn capture_ui_state(
+    app: &AppHandle,
+) -> Result<Option<crate::ui_window_state::UiWindowState>, String> {
+    app.get_webview_window("main")
+        .map(|window| {
+            let hwnd = window.hwnd().map_err(|error| error.to_string())?;
+            crate::ui_window_state::UiWindowState::capture(windows::Win32::Foundation::HWND(hwnd.0))
+                .map_err(|error| error.to_string())
+        })
+        .transpose()
+}
+
+fn restart_arguments(
+    snapshot: Option<crate::ui_window_state::UiWindowState>,
+) -> Result<Vec<String>, String> {
+    let mut arguments = vec!["--replace".to_owned(), "--background".to_owned()];
+    if let Some(snapshot) = snapshot {
+        arguments.push(snapshot.argument().map_err(|error| error.to_string())?);
     }
-    let executable = std::env::current_exe().map_err(|error| error.to_string())?;
-    let executable: Vec<u16> = executable
-        .as_os_str()
-        .to_string_lossy()
-        .encode_utf16()
-        .chain(Some(0))
-        .collect();
-    let operation: Vec<u16> = "runas\0".encode_utf16().collect();
-    let parameters: Vec<u16> = "--replace --background\0".encode_utf16().collect();
-    let result = unsafe {
-        ShellExecuteW(
-            None,
-            PCWSTR(operation.as_ptr()),
-            PCWSTR(executable.as_ptr()),
-            PCWSTR(parameters.as_ptr()),
-            None,
-            SW_HIDE,
-        )
-    };
-    if result.0 as isize <= 32 {
-        return Err(format!("elevation request failed: {}", result.0 as isize));
-    }
+    Ok(arguments)
+}
+
+fn restart_preserving_ui(app: &AppHandle) -> Result<(), String> {
+    use std::os::windows::process::CommandExt;
+    let arguments = restart_arguments(capture_ui_state(app)?)?;
+    std::process::Command::new(std::env::current_exe().map_err(|error| error.to_string())?)
+        .args(arguments)
+        .creation_flags(0x0800_0000)
+        .spawn()
+        .map_err(|error| error.to_string())?;
     if let Some(state) = app.try_state::<AppState>() {
         state.restore_before_exit();
     }
@@ -305,13 +378,24 @@ fn restart_as_admin(app: AppHandle) -> Result<(), String> {
 }
 
 #[tauri::command]
-fn minimize_window(window: tauri::WebviewWindow) {
-    let _ = window.minimize();
+fn minimize_window(window: tauri::WebviewWindow) -> Result<(), String> {
+    sync_visible_window(&window)?;
+    window.minimize().map_err(|error| error.to_string())
 }
 
 #[tauri::command]
-fn close_window(window: tauri::WebviewWindow) {
-    let _ = window.hide();
+fn close_window(window: tauri::WebviewWindow) -> Result<(), String> {
+    sync_visible_window(&window)?;
+    window.hide().map_err(|error| error.to_string())
+}
+
+fn sync_visible_window(window: &tauri::WebviewWindow) -> Result<(), String> {
+    // Native restart restoration bypasses Tao's cached VISIBLE flag. Sync it
+    // only for explicit user actions on an already-visible window.
+    if window.is_visible().map_err(|error| error.to_string())? {
+        window.show().map_err(|error| error.to_string())?;
+    }
+    Ok(())
 }
 
 #[tauri::command]
@@ -350,10 +434,8 @@ async fn check_for_updates_manual(app: tauri::AppHandle) -> Result<String, Strin
                 .download_and_install(|_, _| {}, || {})
                 .await
                 .map_err(|error| error.to_string())?;
-            if let Some(state) = app.try_state::<AppState>() {
-                state.restore_before_exit();
-            }
-            app.restart()
+            restart_preserving_ui(&app)?;
+            Ok("INSTALLED".to_owned())
         }
         None => Ok("LATEST".to_owned()),
     }
@@ -366,24 +448,36 @@ async fn install_background_update(app: tauri::AppHandle) {
     let Ok(Some(update)) = updater.check().await else {
         return;
     };
-    if update.download_and_install(|_, _| {}, || {}).await.is_ok() {
-        if let Some(state) = app.try_state::<AppState>() {
-            state.restore_before_exit();
-        }
-        app.restart();
+    if update.download_and_install(|_, _| {}, || {}).await.is_ok()
+        && let Err(error) = restart_preserving_ui(&app)
+    {
+        eprintln!("update restart failed: {error}");
+    }
+}
+
+fn open_main_window(app: &AppHandle) {
+    if let Some(window) = app.get_webview_window("main") {
+        let _ = window.show();
+        let _ = window.unminimize();
+        let _ = window.set_focus();
     }
 }
 
 pub fn run(instance: SingleInstance) -> anyhow::Result<()> {
     std::mem::forget(instance);
     let quiet = std::env::args().any(|arg| matches!(arg.as_str(), "--autostart" | "--background"));
+    let restore_visible = std::env::args().any(|arg| arg == "--restore-visible");
+    let restore_minimized = std::env::args().any(|arg| arg == "--restore-minimized");
+    let restored_ui =
+        std::env::args().find_map(|arg| crate::ui_window_state::UiWindowState::from_argument(&arg));
     tauri::Builder::default()
         .plugin(tauri_plugin_updater::Builder::new().build())
         .setup(move |app| {
-            let _ = startup::ensure_elevated_task();
             if let Some(window) = app.get_webview_window("main") {
                 let _ = window.set_decorations(false);
                 let _ = window.set_shadow(false);
+                let native = window.hwnd()?;
+                crate::own_window_frame::install(windows::Win32::Foundation::HWND(native.0))?;
                 let scale = window.scale_factor().unwrap_or(1.0);
                 let _ = window.set_size(tauri::PhysicalSize::new(
                     (488.0 * scale).round() as u32,
@@ -391,21 +485,23 @@ pub fn run(instance: SingleInstance) -> anyhow::Result<()> {
                 ));
             }
             let config = Arc::new(RwLock::new(Config::load()));
-            let _ = startup::set_enabled(config.read().unwrap().startup_enabled);
-            let statuses = Arc::new(RwLock::new(HashMap::new()));
-            let controller = WindowController::default();
-            let watcher = Watcher::start(config.clone(), statuses.clone(), controller.clone());
+            if !crate::diagnostics::enabled() {
+                let _ = startup::set_enabled(config.read().unwrap().startup_enabled);
+            }
+            let service = Arc::new(Mutex::new(BorderService::new(
+                config.read().unwrap().clone(),
+            )));
             app.manage(AppState {
                 config,
-                statuses,
-                controller,
-                _watcher: watcher,
+                service,
                 icon_cache: Mutex::new(HashMap::new()),
             });
 
             let updater_app = app.handle().clone();
             tauri::async_runtime::spawn(async move {
-                install_background_update(updater_app).await;
+                if !crate::diagnostics::enabled() {
+                    install_background_update(updater_app).await;
+                }
             });
 
             let show = MenuItem::with_id(app, "show", "열기", true, None::<&str>)?;
@@ -415,6 +511,7 @@ pub fn run(instance: SingleInstance) -> anyhow::Result<()> {
                 .icon(app.default_window_icon().unwrap().clone())
                 .tooltip("Bald")
                 .menu(&menu)
+                .show_menu_on_left_click(false)
                 .on_menu_event(|app, event| match event.id.as_ref() {
                     "quit" => {
                         if let Some(state) = app.try_state::<AppState>() {
@@ -422,38 +519,61 @@ pub fn run(instance: SingleInstance) -> anyhow::Result<()> {
                         }
                         app.exit(0);
                     }
-                    "show" => {
-                        if let Some(window) = app.get_webview_window("main") {
-                            let _ = window.show();
-                            let _ = window.set_focus();
-                        }
-                    }
+                    "show" => open_main_window(app),
                     _ => {}
                 })
                 .on_tray_icon_event(|tray, event| {
-                    if let TrayIconEvent::Click {
+                    if let TrayIconEvent::DoubleClick {
                         button: MouseButton::Left,
                         ..
                     } = event
                     {
-                        if let Some(window) = tray.app_handle().get_webview_window("main") {
-                            let _ = window.show();
-                            let _ = window.set_focus();
-                        }
+                        open_main_window(tray.app_handle());
                     }
                 })
                 .build(app)?;
-            if quiet {
+            if let Some(snapshot) = restored_ui {
+                if let Some(window) = app.get_webview_window("main") {
+                    let hwnd = window.hwnd()?;
+                    snapshot.apply(windows::Win32::Foundation::HWND(hwnd.0))?;
+                }
+            } else if restore_visible || restore_minimized {
+                if let Some(window) = app.get_webview_window("main") {
+                    use windows::Win32::{
+                        Foundation::HWND,
+                        UI::WindowsAndMessaging::{
+                            SW_SHOWMINNOACTIVE, SW_SHOWNOACTIVATE, ShowWindow,
+                        },
+                    };
+                    if let Ok(native) = window.hwnd() {
+                        unsafe {
+                            let _ = ShowWindow(
+                                HWND(native.0),
+                                if restore_minimized {
+                                    SW_SHOWMINNOACTIVE
+                                } else {
+                                    SW_SHOWNOACTIVATE
+                                },
+                            );
+                        }
+                    }
+                }
+            } else if quiet {
                 if let Some(window) = app.get_webview_window("main") {
                     let _ = window.hide();
                 }
+            } else if let Some(window) = app.get_webview_window("main") {
+                let _ = window.show();
+                let _ = window.set_focus();
             }
             Ok(())
         })
         .on_window_event(|window, event| {
             if let WindowEvent::CloseRequested { api, .. } = event {
                 api.prevent_close();
-                let _ = window.hide();
+                if let Some(main) = window.app_handle().get_webview_window("main") {
+                    let _ = close_window(main);
+                }
             }
         })
         .invoke_handler(tauri::generate_handler![
@@ -461,13 +581,14 @@ pub fn run(instance: SingleInstance) -> anyhow::Result<()> {
             list_windows,
             add_application,
             remove_application,
+            set_application_drag_mode,
             set_automatic,
             set_language,
             set_theme,
             set_startup,
             reset_settings,
             exit_app,
-            restart_as_admin,
+            elevate_border_service,
             minimize_window,
             close_window,
             start_window_drag,
@@ -475,6 +596,17 @@ pub fn run(instance: SingleInstance) -> anyhow::Result<()> {
             get_app_version,
             check_for_updates_manual
         ])
-        .run(tauri::generate_context!())
-        .map_err(|error| anyhow::anyhow!(error.to_string()))
+        .build(tauri::generate_context!())
+        .map_err(|error| anyhow::anyhow!(error.to_string()))?
+        .run(|app, event| {
+            if matches!(
+                event,
+                tauri::RunEvent::ExitRequested { .. } | tauri::RunEvent::Exit
+            ) {
+                if let Some(state) = app.try_state::<AppState>() {
+                    state.restore_before_exit();
+                }
+            }
+        });
+    Ok(())
 }

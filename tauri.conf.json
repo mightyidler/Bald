@@ -7,7 +7,7 @@
   "app": {
     "withGlobalTauri": true,
     "windows": [{
-      "label": "main", "title": "Bald", "visible": true,
+      "label": "main", "title": "Bald", "visible": false,
       "width": 488, "height": 720, "resizable": false,
       "maximizable": false, "center": true, "decorations": false,
       "transparent": true, "shadow": false

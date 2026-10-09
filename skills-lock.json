@@ -12,6 +12,34 @@
       "sourceType": "github",
       "skillPath": "skills/transitions-polish/SKILL.md",
       "computedHash": "9057601840defb338093ba6dbd2c5b8a90324c00af44e10e0f2923e2f060d469"
+    },
+    "attention-kind": {
+      "source": "alexgreensh/attention-span",
+      "sourceType": "github",
+      "skillPath": "skills/attention-kind/SKILL.md",
+      "sourceCommit": "2714c965e6be1fa2597510e66651e63bc67cb448",
+      "computedHash": "9072839457ec1186ad4f7b09a7979791432f772aef516b9682be55e6b4abb868"
+    },
+    "karpathy-guidelines": {
+      "source": "multica-ai/andrej-karpathy-skills",
+      "sourceType": "github",
+      "skillPath": "skills/karpathy-guidelines/SKILL.md",
+      "sourceCommit": "2c606141936f1eeef17fa3043a72095b4765b9c2",
+      "computedHash": "6e22cc54cb02a5e98ae42d06d9d7292db0c1b43894831b32879beb0166b2aea7"
+    },
+    "install-anti-slop": {
+      "source": "dmmulroy/anti-slop",
+      "sourceType": "github",
+      "skillPath": "skills/install-anti-slop/SKILL.md",
+      "sourceCommit": "c44ef22ca116d0ba62a3ff663a0bd13a3f3fa40b",
+      "computedHash": "2cb88a6ec0c50d9456c695d3980a29e8b554bfab2a28cc8719ca7fa7a9e05ac5"
+    },
+    "verification-before-completion": {
+      "source": "obra/superpowers",
+      "sourceType": "github",
+      "skillPath": "skills/verification-before-completion/SKILL.md",
+      "sourceCommit": "8ca22dba9a94f28898bbce59f2537ff4d87c747d",
+      "computedHash": "2befe7fc55bcadaa3d97dd9e8efeb633d2561c0ebe74c5a8b17c4d9e7e4520b3"
     }
   }
 }

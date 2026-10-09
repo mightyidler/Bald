@@ -1,8 +1,10 @@
 /target/
 /target-verify/
+/target-probe/
 /node_modules/
 /.reference/
 /artifacts/
+/scripts/
 /gen/
 *.log
 .env

@@ -3,6 +3,15 @@ use uuid::Uuid;
 
 use crate::window_manager::WindowInfo;
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DragMode {
+    Enabled,
+    #[default]
+    #[serde(alias = "auto")]
+    Disabled,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ApplicationRule {
     pub id: Uuid,
@@ -11,6 +20,8 @@ pub struct ApplicationRule {
     pub executable_path: Option<String>,
     pub window_class_hint: Option<String>,
     pub enabled: bool,
+    #[serde(default)]
+    pub drag_mode: DragMode,
 }
 
 impl ApplicationRule {
@@ -22,6 +33,7 @@ impl ApplicationRule {
             executable_path: window.executable_path.clone(),
             window_class_hint: (!window.class_name.is_empty()).then(|| window.class_name.clone()),
             enabled: true,
+            drag_mode: DragMode::Disabled,
         }
     }
 
@@ -70,6 +82,23 @@ mod tests {
             class_name: class.into(),
             is_borderless: false,
         }
+    }
+
+    #[test]
+    fn old_automatic_and_missing_modes_migrate_to_blocked() {
+        let rule = ApplicationRule::from_window(&window(None, "AnyGame.exe", "AnyClass"));
+        assert_eq!(rule.drag_mode, DragMode::Disabled);
+        let mut old = serde_json::to_value(&rule).unwrap();
+        old.as_object_mut().unwrap().remove("drag_mode");
+        let restored: ApplicationRule = serde_json::from_value(old.clone()).unwrap();
+        assert_eq!(restored.drag_mode, DragMode::Disabled);
+        old["drag_mode"] = serde_json::json!("auto");
+        let restored: ApplicationRule = serde_json::from_value(old).unwrap();
+        assert_eq!(restored.drag_mode, DragMode::Disabled);
+        assert_eq!(
+            serde_json::to_value(restored).unwrap()["drag_mode"],
+            "disabled"
+        );
     }
 
     #[test]
