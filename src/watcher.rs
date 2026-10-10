@@ -1,5 +1,5 @@
 use std::{
-    collections::{HashMap, VecDeque},
+    collections::HashMap,
     sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering},
     sync::{Arc, Mutex, OnceLock, RwLock, mpsc},
     thread,
@@ -48,21 +48,11 @@ pub struct Watcher {
 }
 
 static WINDOW_EVENT_WAKE: OnceLock<Mutex<Option<mpsc::Sender<()>>>> = OnceLock::new();
-#[derive(Clone, Copy)]
-struct WindowEvent {
-    hwnd: isize,
-    event: u32,
-    pid: u32,
-    tick: u32,
-    received_us: u128,
-}
-static WINDOW_EVENTS: Mutex<VecDeque<WindowEvent>> = Mutex::new(VecDeque::new());
 static TRACKED_WINDOWS: OnceLock<Mutex<HashMap<isize, u32>>> = OnceLock::new();
 static MOUSE_CONTROLLER: OnceLock<WindowController> = OnceLock::new();
 #[derive(Clone, Copy)]
 enum DragEvent {
     Begin(isize, POINT),
-    Blocked(isize),
     Move(u32),
     End(POINT),
     Cancel,
@@ -147,13 +137,12 @@ unsafe extern "system" fn window_event_callback(
     object_id: i32,
     child_id: i32,
     _thread_id: u32,
-    event_time: u32,
+    _event_time: u32,
 ) {
     if hwnd.0.is_null() || object_id != OBJID_WINDOW.0 || child_id != 0 {
         return;
     }
-    // Out-of-context callbacks only queue identity and event metadata. Geometry,
-    // DWM queries and file writes belong to the scanner, never this callback.
+    // Out-of-context callbacks only request a scan; window operations stay on the scanner.
     if event == EVENT_OBJECT_LOCATIONCHANGE
         && (USER_DRAG_ACTIVE.load(Ordering::Acquire)
             || !TRACKED_WINDOWS
@@ -162,29 +151,6 @@ unsafe extern "system" fn window_event_callback(
     {
         return;
     }
-    let mut pid = 0;
-    unsafe {
-        GetWindowThreadProcessId(hwnd, Some(&mut pid));
-    }
-    if pid == 0 {
-        pid = TRACKED_WINDOWS
-            .get()
-            .and_then(|tracked| tracked.lock().unwrap().get(&(hwnd.0 as isize)).copied())
-            .unwrap_or(0);
-    }
-    let mut events = WINDOW_EVENTS.lock().unwrap();
-    // Bound global event bursts while retaining order for lifecycle transitions.
-    if events.len() == 256 {
-        events.pop_front();
-    }
-    events.push_back(WindowEvent {
-        hwnd: hwnd.0 as isize,
-        event,
-        pid,
-        tick: event_time,
-        received_us: crate::diagnostics::monotonic_us(),
-    });
-    drop(events);
     if let Some(sender) = WINDOW_EVENT_WAKE
         .get_or_init(|| Mutex::new(None))
         .lock()
@@ -221,12 +187,12 @@ unsafe extern "system" fn mouse_hook_callback(
         if USER_DRAG_ACTIVE.swap(false, Ordering::AcqRel) {
             let _ = sender.send(DragEvent::Cancel);
         }
-        if let Some(hwnd) = MOUSE_CONTROLLER
+        if MOUSE_CONTROLLER
             .get()
             .and_then(|controller| controller.native_blocked_drag_target(point))
+            .is_some()
         {
             BLOCKED_STRIP_PRESS.store(true, Ordering::Release);
-            let _ = sender.send(DragEvent::Blocked(hwnd));
             return LRESULT(1);
         }
         let target = MOUSE_CONTROLLER
@@ -310,9 +276,6 @@ impl Watcher {
                     continue;
                 };
                 match event {
-                    DragEvent::Blocked(hwnd) => {
-                        crate::window_manager::record_blocked_strip_press(hwnd);
-                    }
                     DragEvent::Begin(hwnd, point) => {
                         // A previous request must finish before another gesture can issue one.
                         if gesture
@@ -569,11 +532,9 @@ fn scan(
     // Hold the read guard for the complete scan. Configuration mutations then wait
     // for an in-flight apply to finish before disabling a rule and restoring frames.
     let snapshot = config.read().unwrap();
-    let events: Vec<_> = WINDOW_EVENTS.lock().unwrap().drain(..).collect();
     let tracked = TRACKED_WINDOWS.get_or_init(|| Mutex::new(HashMap::new()));
     // This validates PID and ownership markers, including HWND reuse within a PID.
     controller.managed_windows();
-    controller.record_diagnostics();
     if snapshot.applications.is_empty() {
         tracked.lock().unwrap().clear();
         controller.configure_drag_rules(Vec::new());
@@ -598,32 +559,6 @@ fn scan(
             (window.hwnd, pid)
         })
         .collect();
-    if cfg!(debug_assertions) || crate::diagnostics::enabled() {
-        let previous = tracked.lock().unwrap();
-        for event in events {
-            if previous.get(&event.hwnd) == Some(&event.pid)
-                || next_tracked.get(&event.hwnd) == Some(&event.pid)
-            {
-                crate::window_manager::trace_window_event(
-                    event.hwnd,
-                    event.event,
-                    event.pid,
-                    event.tick,
-                    event.received_us,
-                );
-            }
-        }
-        for (&hwnd, &pid) in previous.iter() {
-            if next_tracked.get(&hwnd) != Some(&pid) {
-                crate::window_manager::trace_window_selection(hwnd, false);
-            }
-        }
-        for (&hwnd, &pid) in &next_tracked {
-            if previous.get(&hwnd) != Some(&pid) {
-                crate::window_manager::trace_window_selection(hwnd, true);
-            }
-        }
-    }
     *tracked.lock().unwrap() = next_tracked;
     let drag_rules = windows
         .iter()

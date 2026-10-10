@@ -353,14 +353,24 @@
   backdrop-filter:blur(12px);
   -webkit-backdrop-filter:blur(12px);
 }
-.header::after{
-  content:none;
+.header::after,
+.picker-surface::after{
+  content:"";
+  position:absolute;
+  left:0;
+  right:0;
+  bottom:0;
+  height:1px;
+  opacity:0;
+  pointer-events:none;
+  transition:opacity var(--duration-fast) ease-in-out;
 }
-.header.is-scrolled{
-  box-shadow:inset 0 -1px 0 var(--header-divider);
-}
-.picker-surface.is-scrolled{
-  box-shadow:inset 0 -1px 0 var(--picker-divider);
+.header::after{background:var(--header-divider)}
+.picker-surface::after{background:var(--picker-divider)}
+.header.is-scrolled::after,
+.picker-surface.is-scrolled::after{opacity:1}
+@media (prefers-reduced-motion:reduce){
+  .header::after,.picker-surface::after{transition:none}
 }
 
 :root{

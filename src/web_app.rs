@@ -35,7 +35,6 @@ struct AppState {
 impl AppState {
     fn restore_before_exit(&self) {
         if let Err(error) = self.service.lock().unwrap().shutdown() {
-            crate::diagnostics::record(format!("exit_restore_failed {error}"));
             eprintln!("{error}");
         }
     }
@@ -458,8 +457,8 @@ async fn install_background_update(app: tauri::AppHandle) {
 
 fn open_main_window(app: &AppHandle) {
     if let Some(window) = app.get_webview_window("main") {
-        let replay_content = !window.is_visible().unwrap_or(true)
-            && !window.is_minimized().unwrap_or(true);
+        let replay_content =
+            !window.is_visible().unwrap_or(true) && !window.is_minimized().unwrap_or(true);
         if replay_content {
             let _ = window.eval("window.dispatchEvent(new Event('bald-window-reopened'))");
         }
@@ -491,9 +490,7 @@ pub fn run(instance: SingleInstance) -> anyhow::Result<()> {
                 ));
             }
             let config = Arc::new(RwLock::new(Config::load()));
-            if !crate::diagnostics::enabled() {
-                let _ = startup::set_enabled(config.read().unwrap().startup_enabled);
-            }
+            let _ = startup::set_enabled(config.read().unwrap().startup_enabled);
             let service = Arc::new(Mutex::new(BorderService::new(
                 config.read().unwrap().clone(),
             )));
@@ -505,9 +502,7 @@ pub fn run(instance: SingleInstance) -> anyhow::Result<()> {
 
             let updater_app = app.handle().clone();
             tauri::async_runtime::spawn(async move {
-                if !crate::diagnostics::enabled() {
-                    install_background_update(updater_app).await;
-                }
+                install_background_update(updater_app).await;
             });
 
             let show = MenuItem::with_id(app, "show", "열기", true, None::<&str>)?;

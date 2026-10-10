@@ -11,8 +11,7 @@ the real game's client to its outer size; an owner-thread asynchronous
 minimizing, hiding, activating, or resizing it. Both application and restoration
 use this refresh and confirm geometry before success. Drag interception uses the
 visible client top 12 physical pixels, and centering accounts for hidden frame
-offsets. Other classes retain their existing style-removal path. See
-`MAPLE-DIAGNOSIS.md` for actual-game evidence and remaining input-level checks.
+offsets. Other classes retain their existing style-removal path.
 
 `ihateborders` 1.1.1 was inspected and built successfully on 2026-10-03.
 Its border operation reads `GWL_STYLE`, removes `WS_BORDER`, `WS_CAPTION`,
@@ -47,17 +46,16 @@ The mouse hook consumes only approved top-strip presses/releases; movement passe
 
 ## Game compatibility and verification
 
-All new applications, including MapleStory, use the same native style operation.
+Applications outside the `MapleStoryClass` compatibility path use native style removal.
 Four extended frame styles are also removed; taskbar, layered and topmost flags
 are preserved. Apply/restore position operations skip WM_WINDOWPOSCHANGING, preserving the
-owner order, activation and visibility state. Maple-specific region cropping is
-no longer used for new applications.
+owner order, activation and visibility state. `MapleStoryClass` retains the
+native-frame region path described above.
 User dragging uses a fixed pointer/window anchor, not SC_MOVE or a timed delay.
 Mouse movement is passed through and window operations run on a separate worker.
 Drag position requests retain owner notifications except for the exact
 `MapleStoryClass` compatibility path, which restores SWP_NOSENDCHANGING to bypass
-the modeled Y=0 position-changing callback. Live Maple testing still pins Y to
-zero, so this flag has not established a fix or the real cause. Other window classes keep
+the modeled Y=0 position-changing callback. Other window classes keep
 their owner constraints. Only one asynchronous request is outstanding; mouse bursts replace
 the latest coordinate instead of queuing a trail of stale positions. An already
 posted OS request cannot be cancelled.
@@ -85,9 +83,7 @@ custom dragging until its mode changes, without disabling other windows.
 Original region-based fixtures remain test-only; legacy restoration handling is
 retained without automatically rewriting an un-restored legacy window.
 Win32 regression fixtures cover native APIs without touching live games; actual
-game validation remains separate. Current evidence and remaining checks are in
-`WINDOW-DEBUG.md`.
-Source comparison and evidence limits are recorded in `BORDERLESS-RESEARCH.md`.
+game validation remains separate.
 
 ## Executable icons
 

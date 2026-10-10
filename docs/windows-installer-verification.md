@@ -3,36 +3,11 @@
 BALD uses Tauri 2 and NSIS in currentUser mode. The production identifier remains
 `app.bald.desktop`, product name `Bald`, and binary name `bald.exe`.
 
-## Preserved successful baseline, 2026-10-10
-
-The user confirmed that Windows search and its BALD icon currently work. Before
-changing the installer, the live shortcut and settings were copied to
-`target/shortcut-baseline/20261010-081234`. The original shortcut was only read.
-`baseline.json` records its hash, timestamp, attributes and ACL; `shell-link.json`
-records its actual Shell Link structure. These are local diagnostics, not release artifacts.
-
-| Field | Current successful shortcut | Supplied recipe |
-| --- | --- | --- |
-| Target | `%LOCALAPPDATA%\Bald\bald.exe` | Same |
-| Working directory | `%LOCALAPPDATA%\Bald` | Same |
-| Icon | `%LOCALAPPDATA%\Bald\icons\icon.ico,0` | `bald.exe,0` |
-| Explicit AppUserModelID | Absent | Absent |
-
-The shortcut SHA-256 is `6864B5733FA86CB4312DA37C32604A2CAB0887BBEE4B8B83798DB6391DA38419`.
-Arguments and description are empty; icon index is 0, ShowCommand is 1, HotKey is
-0, and LinkFlags is `0x000040DB`. StringData contains relative target, working
-directory and explicit icon path. ExtraData contains IconEnvironment (`A0000007`),
-KnownFolder (`A000000B`), Tracker (`A0000003`) and PropertyStore (`A0000009`) blocks,
-followed by a valid terminator. A PropertyStore block alone does not imply that
-an explicit AppUserModelID exists. Get-StartApps reports Bald with its EXE path
-as the application identity.
-
 ## Installer behavior
 
 `tools/windows/installer.nsi` is the Tauri NSIS template based on CLI 2.12.1.
 `installer-provenance.json` pins its upstream commit and original hash;
 `LICENSE.tauri` carries its MIT notice. `tauri.conf.json` selects this template.
-The former `installer-hooks.nsh` is no longer configured.
 
 - New Start menu and desktop shortcuts explicitly target `$INSTDIR\bald.exe`,
   use `$INSTDIR` as the working directory, and reference

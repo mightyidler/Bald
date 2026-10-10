@@ -18,14 +18,13 @@ use windows::{
             CloseHandle, GetLastError, HANDLE, HWND, LPARAM, POINT, RECT, SetLastError, WIN32_ERROR,
         },
         Graphics::Dwm::{
-            DWMNCRP_DISABLED, DWMNCRP_ENABLED, DWMWA_EXTENDED_FRAME_BOUNDS,
-            DWMWA_NCRENDERING_ENABLED, DWMWA_NCRENDERING_POLICY, DwmGetWindowAttribute,
-            DwmSetWindowAttribute,
+            DWMNCRP_DISABLED, DWMNCRP_ENABLED, DWMWA_NCRENDERING_ENABLED, DWMWA_NCRENDERING_POLICY,
+            DwmGetWindowAttribute, DwmSetWindowAttribute,
         },
         Graphics::Gdi::{
-            ClientToScreen, CombineRgn, CreateRectRgn, DeleteObject, GetMonitorInfoW, GetRgnBox,
-            GetWindowRgn, HRGN, MONITOR_DEFAULTTONEAREST, MONITORINFO, MonitorFromWindow,
-            RDW_ALLCHILDREN, RDW_FRAME, RDW_INVALIDATE, RGN_COPY, RedrawWindow, SetWindowRgn,
+            ClientToScreen, CombineRgn, CreateRectRgn, DeleteObject, GetMonitorInfoW, GetWindowRgn,
+            HRGN, MONITOR_DEFAULTTONEAREST, MONITORINFO, MonitorFromWindow, RDW_ALLCHILDREN,
+            RDW_FRAME, RDW_INVALIDATE, RGN_COPY, RedrawWindow, SetWindowRgn,
         },
         Security::{GetTokenInformation, TOKEN_ELEVATION, TOKEN_QUERY, TokenElevation},
         System::Threading::{
@@ -340,7 +339,6 @@ pub(crate) struct UserDrag {
     cursor_origin: POINT,
     pending: Option<PendingDragMove>,
     position_flags: SET_WINDOW_POS_FLAGS,
-    traced_request: bool,
 }
 
 #[derive(Clone, Copy)]
@@ -471,7 +469,6 @@ impl WindowController {
             if (rect.left, rect.top) == (x, y) {
                 return Ok(false);
             }
-            trace_frame("center_begin", hwnd, None);
             SetWindowPos(hwnd, None, x, y, 0, 0, user_drag_position_flags(hwnd))?;
             let started = std::time::Instant::now();
             loop {
@@ -480,11 +477,9 @@ impl WindowController {
                 }
                 GetWindowRect(hwnd, &mut rect)?;
                 if (rect.left, rect.top) == (x, y) {
-                    trace_frame("center_confirmed", hwnd, None);
                     return Ok(true);
                 }
                 if started.elapsed() >= std::time::Duration::from_millis(100) {
-                    trace_frame("center_unacknowledged", hwnd, None);
                     bail!("window did not accept the centered position");
                 }
                 std::thread::sleep(std::time::Duration::from_millis(5));
@@ -492,37 +487,6 @@ impl WindowController {
         }
     }
 
-    pub fn record_diagnostics(&self) {
-        if !crate::diagnostics::enabled() {
-            return;
-        }
-        for hwnd_value in self.original_windows.lock().unwrap().keys() {
-            let hwnd = HWND(*hwnd_value as *mut c_void);
-            let mut rect = RECT::default();
-            let mut client = RECT::default();
-            let mut origin = POINT::default();
-            let mut placement = WINDOWPLACEMENT {
-                length: std::mem::size_of::<WINDOWPLACEMENT>() as u32,
-                ..Default::default()
-            };
-            unsafe {
-                let _ = GetWindowRect(hwnd, &mut rect);
-                let _ = GetClientRect(hwnd, &mut client);
-                let _ = ClientToScreen(hwnd, &mut origin);
-                let _ = GetWindowPlacement(hwnd, &mut placement);
-                crate::diagnostics::record_window(
-                    *hwnd_value,
-                    format!(
-                        "window hwnd={hwnd_value:x} style={:08x} exstyle={:08x} visible={} minimized={} rect={rect:?} client={client:?} client_origin={origin:?} placement={placement:?}",
-                        GetWindowLongW(hwnd, GWL_STYLE),
-                        GetWindowLongW(hwnd, GWL_EXSTYLE),
-                        IsWindowVisible(hwnd).as_bool(),
-                        IsIconic(hwnd).as_bool()
-                    ),
-                );
-            }
-        }
-    }
     pub fn make_borderless(&self, hwnd_value: isize) -> Result<bool> {
         let hwnd = HWND(hwnd_value as *mut c_void);
         if is_native_region_game(hwnd) {
@@ -686,13 +650,6 @@ impl WindowController {
                 w!("Bald.OriginalExStyle"),
                 Some(HANDLE(current_ex as isize as *mut c_void)),
             );
-            let saved = self
-                .original_windows
-                .lock()
-                .unwrap()
-                .get(&hwnd_value)
-                .copied();
-            trace_frame("apply_snapshot", hwnd, saved);
             SetLastError(WIN32_ERROR(0));
             let previous = if current as u32 & BORDER_STYLES != 0 {
                 SetWindowLongW(hwnd, GWL_STYLE, (current as u32 & !BORDER_STYLES) as i32)
@@ -700,14 +657,6 @@ impl WindowController {
                 current
             };
             let error = GetLastError();
-            trace_frame(
-                &format!(
-                    "apply_style_result previous={previous:08x} error={}",
-                    error.0
-                ),
-                hwnd,
-                saved,
-            );
             if previous == 0 {
                 if error.0 != 0 {
                     self.original_windows.lock().unwrap().remove(&hwnd_value);
@@ -727,7 +676,6 @@ impl WindowController {
                 let _ = set_style_checked(hwnd, current);
                 return Err(error);
             }
-            trace_frame("apply_style", hwnd, saved);
             let flags = SWP_FRAMECHANGED | QUIET_POSITION | owner_frame_dispatch(hwnd);
             let positioned = SetWindowPos(
                 hwnd,
@@ -737,11 +685,6 @@ impl WindowController {
                 client_width,
                 client_height,
                 flags,
-            );
-            trace_frame(
-                &format!("apply_geometry flags={:x} result={positioned:?}", flags.0),
-                hwnd,
-                saved,
             );
             positioned?;
             if is_native_region_game(hwnd) {
@@ -753,7 +696,6 @@ impl WindowController {
                     client_height,
                 )?;
             }
-            trace_frame("apply_geometry", hwnd, saved);
             Ok(true)
         }
     }
@@ -869,17 +811,11 @@ impl WindowController {
             // A changed clip alone does not require rebuilding the native frame.
             // Rebuilding can expose the logical caption retained for Maple's input.
             if rendering != Some(false) {
-                trace_frame("native_policy_change_begin", hwnd, saved);
                 let policy = DwmSetWindowAttribute(
                     hwnd,
                     DWMWA_NCRENDERING_POLICY,
                     &DWMNCRP_DISABLED as *const _ as *const c_void,
                     std::mem::size_of_val(&DWMNCRP_DISABLED) as u32,
-                );
-                trace_frame(
-                    &format!("native_policy_change_result={policy:?}"),
-                    hwnd,
-                    saved,
                 );
                 if let Err(error) = policy {
                     let _ = DeleteObject(desired.into());
@@ -889,20 +825,11 @@ impl WindowController {
                 // complete this notification before installing the final clip.
                 let flags = SWP_FRAMECHANGED | SWP_NOMOVE | SWP_NOSIZE | QUIET_POSITION;
                 let positioned = SetWindowPos(hwnd, None, 0, 0, 0, 0, flags);
-                trace_frame(
-                    &format!(
-                        "native_policy_frame flags={:x} result={positioned:?}",
-                        flags.0
-                    ),
-                    hwnd,
-                    saved,
-                );
                 if let Err(error) = positioned {
                     let _ = DeleteObject(desired.into());
                     return Err(error.into());
                 }
             } else {
-                trace_frame("native_region_only_repair", hwnd, saved);
             }
             if SetWindowRgn(hwnd, Some(desired), false) == 0 {
                 let error = GetLastError();
@@ -942,7 +869,6 @@ impl WindowController {
                 None,
                 RDW_INVALIDATE | RDW_FRAME | RDW_ALLCHILDREN,
             );
-            trace_frame("native_region_applied", hwnd, None);
             Ok(true)
         }
     }
@@ -999,17 +925,6 @@ impl WindowController {
                     bail!("elevation_required");
                 }
                 bail!("SetWindowRgn failed: {}", error.0);
-            }
-            if crate::diagnostics::enabled() {
-                let mut after_client = RECT::default();
-                let mut after_origin = POINT::default();
-                let _ = GetClientRect(hwnd, &mut after_client);
-                let _ = ClientToScreen(hwnd, &mut after_origin);
-                crate::diagnostics::record(format!(
-                    "clip hwnd={hwnd_value:x} window={window:?} before_client={client:?} before_origin={origin:?} region=({left},{top},{},{}) after_client={after_client:?} after_origin={after_origin:?}",
-                    left + client.right,
-                    top + client.bottom
-                ));
             }
             // On success Windows owns desired; previous remains ours until restore.
             let mut windows = self.original_windows.lock().unwrap();
@@ -1102,9 +1017,6 @@ impl WindowController {
                     let _ = DeleteObject(region.into());
                     bail!("set normalized game frame region failed");
                 }
-                crate::diagnostics::record(format!(
-                    "clip_normalized hwnd={hwnd_value:x} requested_content={client:?} actual_content={normalized_client:?} window={normalized_window:?}"
-                ));
                 if let Some(state) = self.original_windows.lock().unwrap().get_mut(&hwnd_value) {
                     state.clipped_size = Some((
                         normalized_window.right - normalized_window.left,
@@ -1154,7 +1066,6 @@ impl WindowController {
             if let Some(state) = self.original_windows.lock().unwrap().get_mut(&hwnd_value) {
                 state.restoring = true;
             }
-            trace_frame("restore_begin", hwnd, original);
             if let Some(state) = original.filter(|state| state.native_region) {
                 let region = if let Some(saved) = state.original_region {
                     let copy = CreateRectRgn(0, 0, 0, 0);
@@ -1214,7 +1125,6 @@ impl WindowController {
                 self.forget_window(hwnd_value);
                 let _ = RemovePropW(hwnd, w!("Bald.OriginalStyle"));
                 let _ = RemovePropW(hwnd, w!("Bald.NativeFrameRegion"));
-                trace_frame("native_region_restored", hwnd, None);
                 return Ok(true);
             }
             if original.is_some_and(|state| state.clipped)
@@ -1333,9 +1243,6 @@ impl WindowController {
                             before_client.bottom + insets.top + insets.bottom,
                             SWP_FRAMECHANGED | SWP_NOACTIVATE | SWP_NOZORDER | SWP_NOREDRAW,
                         )?;
-                        crate::diagnostics::record(format!(
-                            "restore_native_outer hwnd={hwnd_value:x} insets={insets:?} content={before_client:?}"
-                        ));
                     }
                 }
                 // Restoring an old region can itself recalculate a game's client
@@ -1401,9 +1308,6 @@ impl WindowController {
                             None,
                             RDW_INVALIDATE | RDW_FRAME | RDW_ALLCHILDREN,
                         );
-                        crate::diagnostics::record(format!(
-                            "restore_caption_failed hwnd={hwnd_value:x} window={restored_window:?} origin={restored_origin:?}; content geometry rolled back"
-                        ));
                         bail!(
                             "game caption restoration incomplete; managed state retained for retry"
                         );
@@ -1458,12 +1362,10 @@ impl WindowController {
                     bail!("restore SetWindowLongW failed: {}", error.0);
                 }
             }
-            trace_frame("restore_style", hwnd, original);
             // Let the owner refresh its frame state, without permitting a move
             // or resize. NOSENDCHANGING is for direct geometry writes, not this
             // notification: some owners otherwise retain a full-window client.
             refresh_native_frame(hwnd)?;
-            trace_frame("restore_frame_notification", hwnd, original);
             if original.is_some_and(|state| state.native_rendering == Some(true))
                 && native_frame_rendering(hwnd) == Some(false)
             {
@@ -1474,9 +1376,7 @@ impl WindowController {
                     &policy as *const _ as *const c_void,
                     std::mem::size_of_val(&policy) as u32,
                 )?;
-                trace_frame("restore_dwm_policy", hwnd, original);
                 refresh_native_frame(hwnd)?;
-                trace_frame("restore_dwm_frame", hwnd, original);
             }
             let frame_was_deferred = if let Some(original) = original {
                 wait_for_native_frame(hwnd, original, current as u32 & WS_MINIMIZE.0 != 0)?
@@ -1558,7 +1458,6 @@ impl WindowController {
                 }
             }
             self.original_windows.lock().unwrap().remove(&hwnd_value);
-            trace_frame("restore_complete", hwnd, original);
             let _ = RemovePropW(hwnd, w!("Bald.OriginalStyle"));
             let _ = RemovePropW(hwnd, w!("Bald.OriginalExStyle"));
             let _ = RedrawWindow(Some(hwnd), None, None, RDW_INVALIDATE | RDW_FRAME);
@@ -1686,12 +1585,6 @@ impl WindowController {
         let mut errors = Vec::new();
         for hwnd in handles {
             if let Err(error) = self.restore_borders(hwnd) {
-                let saved = self.original_windows.lock().unwrap().get(&hwnd).copied();
-                trace_frame(
-                    &format!("restore_failed: {error}"),
-                    HWND(hwnd as *mut c_void),
-                    saved,
-                );
                 errors.push(format!("{hwnd:x}: {error}"));
             }
         }
@@ -1719,11 +1612,6 @@ impl WindowController {
         let (_, drag_height) = self.drag_context(hwnd_value)?;
         let rect = self.drag_surface(root)?;
         if !is_drag_point(cursor, rect, drag_height) {
-            if crate::diagnostics::enabled() {
-                crate::diagnostics::record(format!(
-                    "drag_rejected hwnd={hwnd_value:x} cursor={cursor:?} rect={rect:?} height={drag_height}"
-                ));
-            }
             return None;
         }
         Some(hwnd_value)
@@ -1795,7 +1683,6 @@ impl WindowController {
             cursor_origin: cursor,
             pending: None,
             position_flags: user_drag_position_flags(hwnd),
-            traced_request: false,
         })
     }
 
@@ -1832,14 +1719,6 @@ impl WindowController {
                 rule.stalled = true;
                 rule.in_flight = false;
             }
-            trace_frame(
-                &format!(
-                    "drag_stopped_unacknowledged_position expected={},{} flags={:x}",
-                    pending.x, pending.y, drag.position_flags.0
-                ),
-                hwnd,
-                None,
-            );
             return Ok(false);
         }
         Ok(permitted || drag.pending.is_some())
@@ -1886,17 +1765,6 @@ impl WindowController {
             }
             if let Some(rule) = self.drag_rules.lock().unwrap().get_mut(&drag.hwnd) {
                 rule.in_flight = true;
-            }
-            if !drag.traced_request {
-                trace_frame(
-                    &format!(
-                        "drag_first_request expected={x},{y} flags={:x}",
-                        drag.position_flags.0
-                    ),
-                    hwnd,
-                    None,
-                );
-                drag.traced_request = true;
             }
             let moved = SetWindowPos(hwnd, None, x, y, 0, 0, drag.position_flags);
             if let Err(error) = moved {
@@ -2013,105 +1881,6 @@ fn native_frame_rendering(hwnd: HWND) -> Option<bool> {
     Some(enabled != 0)
 }
 
-pub(crate) fn trace_window_selection(hwnd_value: isize, selected: bool) {
-    trace_frame(
-        if selected {
-            "hwnd_selected"
-        } else {
-            "hwnd_retired"
-        },
-        HWND(hwnd_value as *mut c_void),
-        None,
-    );
-}
-
-pub(crate) fn trace_window_event(
-    hwnd_value: isize,
-    event: u32,
-    pid: u32,
-    event_time: u32,
-    received_us: u128,
-) {
-    trace_frame(
-        &format!(
-            "win_event={event:x} source_pid={pid} event_tick_ms={event_time} received_us={received_us}"
-        ),
-        HWND(hwnd_value as *mut c_void),
-        None,
-    );
-}
-
-fn trace_frame(stage: &str, hwnd: HWND, saved: Option<OriginalWindowState>) {
-    let monotonic_us = crate::diagnostics::monotonic_us();
-    let mut outer = RECT::default();
-    let mut client = RECT::default();
-    let mut origin = POINT::default();
-    unsafe {
-        let outer_ok = GetWindowRect(hwnd, &mut outer).is_ok();
-        let client_ok = GetClientRect(hwnd, &mut client).is_ok();
-        let origin_ok = ClientToScreen(hwnd, &mut origin).as_bool();
-        let style = GetWindowLongW(hwnd, GWL_STYLE) as u32;
-        let region = CreateRectRgn(0, 0, 0, 0);
-        let mut region_bounds = RECT::default();
-        let region_kind = if region.0.is_null() {
-            0
-        } else {
-            GetWindowRgn(hwnd, region).0
-        };
-        if region_kind != 0 {
-            GetRgnBox(region, &mut region_bounds);
-        }
-        let _ = DeleteObject(region.into());
-        let mut dwm_bounds = RECT::default();
-        let dwm_bounds_ok = DwmGetWindowAttribute(
-            hwnd,
-            DWMWA_EXTENDED_FRAME_BOUNDS,
-            &mut dwm_bounds as *mut _ as *mut c_void,
-            std::mem::size_of::<RECT>() as u32,
-        )
-        .is_ok();
-        crate::diagnostics::record_frame(serde_json::json!({
-            "region_kind": region_kind,
-            "region_bounds_window": (region_kind != 0).then_some([region_bounds.left, region_bounds.top, region_bounds.right, region_bounds.bottom]),
-            "style_flags": {
-                "caption": style & WS_CAPTION.0 == WS_CAPTION.0,
-                "thickframe": style & WS_THICKFRAME.0 != 0,
-                "border": style & WS_BORDER.0 != 0,
-                "dlgframe": style & WS_DLGFRAME.0 != 0,
-                "sysmenu": style & WS_SYSMENU.0 != 0
-            },
-            "dwm_bounds_screen": dwm_bounds_ok.then_some([dwm_bounds.left, dwm_bounds.top, dwm_bounds.right, dwm_bounds.bottom]),
-            "time_ms": std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|time| time.as_millis()).unwrap_or_default(),
-            "monotonic_us": monotonic_us,
-            "pid": window_process_id(hwnd),
-            "alive": IsWindow(Some(hwnd)).as_bool(),
-            "zoomed": IsZoomed(hwnd).as_bool(),
-            "stage": stage, "hwnd": format!("{:x}", hwnd.0 as usize),
-            "style": format!("{:08x}", GetWindowLongW(hwnd, GWL_STYLE)),
-            "ex_style": format!("{:08x}", GetWindowLongW(hwnd, GWL_EXSTYLE)),
-            "native_rendering": native_frame_rendering(hwnd),
-            "visible": IsWindowVisible(hwnd).as_bool(), "minimized": IsIconic(hwnd).as_bool(),
-            "outer": outer_ok.then_some([outer.left, outer.top, outer.right, outer.bottom]),
-            "client": client_ok.then_some([client.right, client.bottom]),
-            "client_rect_local": client_ok.then_some([client.left, client.top, client.right, client.bottom]),
-            "origin": origin_ok.then_some([origin.x, origin.y]),
-            "saved": saved.map(|state| serde_json::json!({
-                "style": format!("{:08x}", state.style), "ex_style": format!("{:08x}", state.ex_style),
-                "native_rendering": state.native_rendering,
-                "insets": [state.frame_insets.left, state.frame_insets.top, state.frame_insets.right, state.frame_insets.bottom]
-            }))
-        }));
-    }
-}
-
-pub(crate) fn record_blocked_strip_press(hwnd: isize) {
-    trace_frame(
-        "blocked_strip_press_consumed",
-        HWND(hwnd as *mut c_void),
-        None,
-    );
-}
-
 fn owner_frame_dispatch(hwnd: HWND) -> SET_WINDOW_POS_FLAGS {
     if is_native_region_game(hwnd) {
         SWP_ASYNCWINDOWPOS
@@ -2193,11 +1962,6 @@ fn wait_for_native_frame(
             if minimized && !originally_minimized && original.frame_insets.top > 0 {
                 // A minimized zero-client rectangle cannot prove the visible
                 // caption returned. Keep ownership for a later confirmation.
-                trace_frame(
-                    "restore_caption_deferred_while_minimized",
-                    hwnd,
-                    Some(original),
-                );
                 bail!(
                     "caption confirmation deferred while minimized; managed state retained for retry"
                 );
@@ -2208,21 +1972,14 @@ fn wait_for_native_frame(
             let rendering_ready = original.native_rendering != Some(true)
                 || native_frame_rendering(hwnd) == Some(true);
             if caption_ready && rendering_ready {
-                if waiting && !minimized {
-                    trace_frame("restore_frame_confirmed_after_wait", hwnd, Some(original));
-                }
                 return Ok(waiting);
             }
             if std::time::Instant::now() >= deadline {
-                trace_frame("restore_frame_confirmation_timeout", hwnd, Some(original));
                 bail!(
                     "native frame restoration unconfirmed after 5s; managed state retained for retry"
                 );
             }
-            if !waiting {
-                trace_frame("restore_waiting_for_owner", hwnd, Some(original));
-                waiting = true;
-            }
+            waiting = true;
         }
         std::thread::sleep(std::time::Duration::from_millis(100));
     }
@@ -2237,14 +1994,6 @@ fn set_window_long_checked(
         SetLastError(WIN32_ERROR(0));
         let previous = SetWindowLongW(hwnd, index, value);
         let error = GetLastError();
-        trace_frame(
-            &format!(
-                "set_window_long index={} requested={value:08x} previous={previous:08x} error={}",
-                index.0, error.0
-            ),
-            hwnd,
-            None,
-        );
         if previous == 0 {
             if error.0 != 0 {
                 bail!("set window style failed: {}", error.0);
@@ -2265,10 +2014,6 @@ fn refresh_cached_caption(hwnd: HWND, restored_style: i32) -> Result<()> {
         SetWindowPos(hwnd, None, 0, 0, 0, 0, flags)?;
     }
     first_refresh?;
-    crate::diagnostics::record(format!(
-        "caption_style_transition hwnd={:x}",
-        hwnd.0 as isize
-    ));
     Ok(())
 }
 
@@ -2493,42 +2238,5 @@ mod tests {
         let icon = executable_icon(path.to_str().unwrap()).expect("executable icon");
         assert!(icon.width >= 32);
         assert_eq!(icon.rgba.len(), (icon.width * icon.height * 4) as usize);
-    }
-
-    #[test]
-    #[ignore = "manual read-only icon resource inspection; requires BALD_ICON_TEST_PATHS"]
-    fn inspect_registered_application_icon_resources() {
-        let paths: Vec<String> = serde_json::from_str(
-            &std::env::var("BALD_ICON_TEST_PATHS").expect("selected executable paths"),
-        )
-        .unwrap();
-        for path in paths {
-            let name = std::path::Path::new(&path)
-                .file_name()
-                .unwrap()
-                .to_str()
-                .unwrap();
-            let native = icon_resources::from_executable(&path);
-            let shell = high_resolution_executable_icon(&path);
-            println!(
-                "{name}: native={:?}, shell={:?}",
-                native.as_ref().map(|icon| (icon.width, icon.height)),
-                shell.as_ref().map(|icon| (icon.width, icon.height))
-            );
-            let icon = native
-                .or(shell)
-                .or_else(|| legacy_executable_icon(&path))
-                .expect("application icon");
-            let output =
-                std::path::Path::new("artifacts").join(format!("icon-resource-{name}.png"));
-            image::save_buffer(
-                output,
-                &icon.rgba,
-                icon.width,
-                icon.height,
-                image::ColorType::Rgba8,
-            )
-            .unwrap();
-        }
     }
 }

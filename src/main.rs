@@ -2,7 +2,6 @@
 
 mod border_service;
 mod config;
-mod diagnostics;
 mod i18n;
 mod own_window_frame;
 mod rules;
@@ -36,7 +35,7 @@ fn main() -> anyhow::Result<()> {
     let elevated_task = arguments
         .iter()
         .any(|argument| argument == "--elevated-task");
-    if !diagnostics::enabled() && !elevated_task && !replace && startup::launch_elevated_task()? {
+    if !elevated_task && !replace && startup::launch_elevated_task()? {
         return Ok(());
     }
     let mut instance = single_instance::SingleInstance::acquire()?;

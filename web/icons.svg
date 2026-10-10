@@ -1,9 +1,0 @@
-<svg xmlns="http://www.w3.org/2000/svg" style="display:none">
-<symbol id="icon-minimize" viewBox="0 0 16 16" fill="none"><path d="M3.333 8H12.667" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></symbol>
-<symbol id="icon-close" viewBox="0 0 16 16" fill="none"><path d="M12 4L4 12M4 4L12 12" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></symbol>
-<symbol id="icon-plus" viewBox="0 0 20 20" fill="none"><path d="M10 4.167V15.833M4.167 10H15.833" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></symbol>
-<symbol id="icon-monitor" viewBox="0 0 24 24" fill="none"><rect x="3" y="4" width="18" height="13" rx="2" stroke="currentColor" stroke-width="1.8"/><path d="M8 21h8M12 17v4" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></symbol>
-<symbol id="icon-search" viewBox="0 0 20 20" fill="none"><circle cx="9" cy="9" r="5.8" stroke="currentColor" stroke-width="1.7"/><path d="m13.5 13.5 3.5 3.5" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/></symbol>
-<symbol id="icon-chevron" viewBox="0 0 24 24" fill="none"><path d="M6 9L12 15L18 9" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></symbol>
-<symbol id="icon-check" viewBox="0 0 16 16" fill="none"><path d="M3 8L6.5 11.5L13 4.5" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></symbol>
-</svg>
