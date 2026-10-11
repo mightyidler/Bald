@@ -5,11 +5,16 @@ use serde::{Deserialize, Serialize};
 use std::ffi::c_void;
 use windows::Win32::{
     Foundation::{HWND, RECT},
+    Graphics::Gdi::{
+        GetMonitorInfoW, HMONITOR, MONITOR_DEFAULTTONEAREST, MONITORINFO, MonitorFromRect,
+        MonitorFromWindow,
+    },
     UI::WindowsAndMessaging::{
-        GW_HWNDPREV, GetWindow, GetWindowPlacement, GetWindowRect, GetWindowThreadProcessId,
-        HWND_BOTTOM, HWND_TOP, IsIconic, IsWindow, IsWindowVisible, SW_HIDE, SW_SHOWMINNOACTIVE,
-        SWP_NOACTIVATE, SWP_NOOWNERZORDER, SWP_NOSENDCHANGING, SWP_SHOWWINDOW, SetWindowPlacement,
-        SetWindowPos, ShowWindow, WINDOWPLACEMENT,
+        GW_HWNDPREV, GWL_EXSTYLE, GetWindow, GetWindowLongW, GetWindowPlacement, GetWindowRect,
+        GetWindowThreadProcessId, HWND_BOTTOM, HWND_TOP, IsIconic, IsWindow, IsWindowVisible,
+        SW_HIDE, SW_SHOWMINNOACTIVE, SWP_NOACTIVATE, SWP_NOOWNERZORDER, SWP_NOSENDCHANGING,
+        SWP_SHOWWINDOW, SetWindowPlacement, SetWindowPos, ShowWindow, WINDOWPLACEMENT,
+        WS_EX_TOOLWINDOW,
     },
 };
 
@@ -23,6 +28,16 @@ pub struct UiWindowState {
 }
 
 impl UiWindowState {
+    pub fn visible(self) -> bool {
+        self.visible
+    }
+
+    pub fn hidden(mut self) -> Self {
+        self.visible = false;
+        self.minimized = false;
+        self
+    }
+
     pub fn capture(hwnd: HWND) -> Result<Self> {
         unsafe {
             let visible = IsWindowVisible(hwnd).as_bool();
@@ -35,6 +50,9 @@ impl UiWindowState {
                 };
                 GetWindowPlacement(hwnd, &mut placement)?;
                 rect = placement.rcNormalPosition;
+                let (x, y) =
+                    placement_offset(hwnd, MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST))?;
+                rect = offset_rect(rect, x, y);
             } else {
                 GetWindowRect(hwnd, &mut rect)?;
             }
@@ -95,6 +113,10 @@ impl UiWindowState {
                     right: self.rect[2],
                     bottom: self.rect[3],
                 };
+                let monitor =
+                    MonitorFromRect(&placement.rcNormalPosition, MONITOR_DEFAULTTONEAREST);
+                let (x, y) = placement_offset(hwnd, monitor)?;
+                placement.rcNormalPosition = offset_rect(placement.rcNormalPosition, -x, -y);
                 SetWindowPlacement(hwnd, &placement)?;
             }
             let mut flags = SWP_NOACTIVATE | SWP_NOOWNERZORDER | SWP_NOSENDCHANGING;
@@ -119,9 +141,57 @@ impl UiWindowState {
     }
 }
 
+fn placement_offset(hwnd: HWND, monitor: HMONITOR) -> Result<(i32, i32)> {
+    unsafe {
+        if GetWindowLongW(hwnd, GWL_EXSTYLE) as u32 & WS_EX_TOOLWINDOW.0 != 0 {
+            return Ok((0, 0));
+        }
+        let mut info = MONITORINFO {
+            cbSize: std::mem::size_of::<MONITORINFO>() as u32,
+            ..Default::default()
+        };
+        GetMonitorInfoW(monitor, &mut info).ok()?;
+        Ok((
+            info.rcWork.left - info.rcMonitor.left,
+            info.rcWork.top - info.rcMonitor.top,
+        ))
+    }
+}
+
+fn offset_rect(rect: RECT, x: i32, y: i32) -> RECT {
+    RECT {
+        left: rect.left + x,
+        top: rect.top + y,
+        right: rect.right + x,
+        bottom: rect.bottom + y,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn minimized_snapshots_use_screen_coordinates_for_recreation_with_top_or_left_taskbars() {
+        for (x, y) in [(48, 0), (0, 40), (56, 44)] {
+            let screen = RECT {
+                left: -1700,
+                top: 100,
+                right: -1212,
+                bottom: 820,
+            };
+            let placement = offset_rect(screen, -x, -y);
+            let captured = offset_rect(placement, x, y);
+            let snapshot = UiWindowState {
+                visible: true,
+                minimized: true,
+                rect: [captured.left, captured.top, captured.right, captured.bottom],
+                above: 0,
+                above_pid: 0,
+            };
+            assert_eq!(snapshot.hidden().rect, [-1700, 100, -1212, 820]);
+            assert_eq!(offset_rect(captured, -x, -y), placement);
+        }
+    }
     unsafe extern "system" fn fixture_proc(
         hwnd: HWND,
         message: u32,

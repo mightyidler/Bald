@@ -18,6 +18,89 @@ use windows::Win32::{
 
 struct Fixture(HWND);
 
+#[test]
+fn caption_refresh_preserves_owner_changes_during_intermediate_frame_callback() {
+    use windows::Win32::UI::WindowsAndMessaging::WS_DISABLED;
+    let window = Fixture::new(WS_OVERLAPPEDWINDOW);
+    let original = unsafe { GetWindowLongW(window.0, GWL_STYLE) };
+    assert_eq!(original as u32 & WS_DISABLED.0, 0);
+    unsafe {
+        SetPropW(
+            window.0,
+            w!("Bald.TestDisableDuringCaptionRefresh"),
+            Some(HANDLE(std::ptr::dangling_mut())),
+        )
+        .unwrap();
+    }
+    refresh_cached_caption(window.0, original).unwrap();
+    let current = unsafe { GetWindowLongW(window.0, GWL_STYLE) } as u32;
+    assert_ne!(
+        current & WS_DISABLED.0,
+        0,
+        "the owner's intervening disable must survive caption restoration"
+    );
+    assert_eq!(current & WS_CAPTION.0, original as u32 & WS_CAPTION.0);
+    assert!(unsafe {
+        GetPropW(window.0, w!("Bald.TestDisableDuringCaptionRefresh"))
+            .0
+            .is_null()
+    });
+}
+
+#[test]
+fn marker_failure_does_not_mutate_styles_or_leak_native_regions() {
+    use windows::Win32::System::Threading::{GR_GDIOBJECTS, GetGuiResources};
+    for maple in [false, true] {
+        let window = Fixture::new_fixture(WS_OVERLAPPEDWINDOW, false, maple);
+        let controller = WindowController::default();
+        let style = unsafe { GetWindowLongW(window.0, GWL_STYLE) };
+        let ex_style = unsafe { GetWindowLongW(window.0, GWL_EXSTYLE) };
+        unsafe {
+            SetPropW(
+                window.0,
+                w!("Bald.TestFailMarker"),
+                Some(HANDLE(std::ptr::dangling_mut())),
+            )
+            .unwrap();
+        }
+        let objects = unsafe { GetGuiResources(GetCurrentProcess(), GR_GDIOBJECTS) };
+        for _ in 0..30 {
+            assert!(controller.make_borderless(window.value()).is_err());
+        }
+        assert_eq!(
+            unsafe { GetGuiResources(GetCurrentProcess(), GR_GDIOBJECTS) },
+            objects
+        );
+        assert_eq!(unsafe { GetWindowLongW(window.0, GWL_STYLE) }, style);
+        assert_eq!(unsafe { GetWindowLongW(window.0, GWL_EXSTYLE) }, ex_style);
+        assert!(controller.managed_windows().is_empty());
+        assert!(unsafe { GetPropW(window.0, w!("Bald.OriginalStyle")).0.is_null() });
+    }
+}
+
+#[test]
+fn partial_native_failure_keeps_snapshot_and_can_restore_after_retry() {
+    for failure in [w!("Bald.TestFailDwm"), w!("Bald.TestFailRegion")] {
+        with_pumped_maple_fixture(|window| {
+            let controller = WindowController::default();
+            let style = unsafe { GetWindowLongW(window.0, GWL_STYLE) };
+            unsafe {
+                SetPropW(window.0, failure, Some(HANDLE(std::ptr::dangling_mut()))).unwrap();
+            }
+            assert!(controller.make_borderless(window.value()).is_err());
+            assert_eq!(controller.managed_windows().len(), 1);
+            assert_eq!(unsafe { GetWindowLongW(window.0, GWL_STYLE) }, style);
+            unsafe {
+                let _ = RemovePropW(window.0, failure);
+            }
+            controller.restore_all_borders().unwrap();
+            assert!(controller.managed_windows().is_empty());
+            assert!(unsafe { GetPropW(window.0, w!("Bald.OriginalStyle")).0.is_null() });
+            assert!(unsafe { GetPropW(window.0, w!("Bald.NativeFrameRegion")).0.is_null() });
+        });
+    }
+}
+
 unsafe extern "system" fn fixture_proc(
     hwnd: HWND,
     message: u32,
@@ -35,6 +118,18 @@ unsafe extern "system" fn fixture_proc(
                 Some(HANDLE((count + 1) as *mut c_void)),
             )
             .unwrap();
+            if !GetPropW(hwnd, w!("Bald.TestDisableDuringCaptionRefresh"))
+                .0
+                .is_null()
+            {
+                let _ = RemovePropW(hwnd, w!("Bald.TestDisableDuringCaptionRefresh"));
+                let style = GetWindowLongW(hwnd, GWL_STYLE) as u32;
+                SetWindowLongW(
+                    hwnd,
+                    GWL_STYLE,
+                    (style | windows::Win32::UI::WindowsAndMessaging::WS_DISABLED.0) as i32,
+                );
+            }
         }
     }
     if message == windows::Win32::UI::WindowsAndMessaging::WM_GETTEXT {
@@ -187,7 +282,7 @@ unsafe extern "system" fn region_sensitive_proc(
                 let _ = SetPropW(
                     hwnd,
                     w!("Bald.TestCachedFrame"),
-                    Some(HANDLE(1usize as *mut c_void)),
+                    Some(HANDLE(std::ptr::dangling_mut::<c_void>())),
                 );
             }
         }
@@ -234,7 +329,7 @@ fn restoration_refreshes_cached_nonclient_frame_before_forgetting_window() {
         SetPropW(
             window.0,
             w!("Bald.TestStickyFrame"),
-            Some(HANDLE(1usize as *mut c_void)),
+            Some(HANDLE(std::ptr::dangling_mut::<c_void>())),
         )
         .unwrap();
     }
@@ -262,13 +357,13 @@ fn incomplete_caption_restore_retains_state_and_can_be_retried() {
         SetPropW(
             window.0,
             w!("Bald.TestStickyFrame"),
-            Some(HANDLE(1usize as *mut c_void)),
+            Some(HANDLE(std::ptr::dangling_mut::<c_void>())),
         )
         .unwrap();
         SetPropW(
             window.0,
             w!("Bald.TestRefuseFrameRestore"),
-            Some(HANDLE(1usize as *mut c_void)),
+            Some(HANDLE(std::ptr::dangling_mut::<c_void>())),
         )
         .unwrap();
     }
@@ -326,7 +421,12 @@ fn failed_frame_restore_does_not_compensate_using_missing_caption() {
             w!("Bald.TestStickyFrame"),
             w!("Bald.TestRefuseFrameRestore"),
         ] {
-            SetPropW(window.0, name, Some(HANDLE(1usize as *mut c_void))).unwrap();
+            SetPropW(
+                window.0,
+                name,
+                Some(HANDLE(std::ptr::dangling_mut::<c_void>())),
+            )
+            .unwrap();
         }
     }
     let controller = WindowController::default();
@@ -335,7 +435,7 @@ fn failed_frame_restore_does_not_compensate_using_missing_caption() {
         SetPropW(
             window.0,
             w!("Bald.TestCountRestoreSizes"),
-            Some(HANDLE(1usize as *mut c_void)),
+            Some(HANDLE(std::ptr::dangling_mut::<c_void>())),
         )
         .unwrap();
     }
@@ -396,7 +496,7 @@ impl Fixture {
                     0
                 );
             });
-            Self(
+            let fixture = Self(
                 CreateWindowExW(
                     WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE,
                     if maple {
@@ -418,7 +518,14 @@ impl Fixture {
                     None,
                 )
                 .unwrap(),
+            );
+            SetPropW(
+                fixture.0,
+                w!("Bald.TestMouseState"),
+                Some(HANDLE(std::ptr::dangling_mut())),
             )
+            .unwrap();
+            fixture
         }
     }
     fn value(&self) -> isize {
@@ -452,6 +559,209 @@ fn restoration_does_not_change_unmanaged_popup() {
             .unwrap()
     );
     assert_eq!(unsafe { GetWindowLongW(window.0, GWL_STYLE) }, before);
+}
+
+#[test]
+fn restoration_preserves_disabled_and_other_application_style_changes() {
+    use windows::Win32::UI::WindowsAndMessaging::{WS_DISABLED, WS_HSCROLL};
+    let window = Fixture::new(WS_OVERLAPPEDWINDOW);
+    let controller = WindowController::default();
+    controller.make_borderless(window.value()).unwrap();
+    unsafe {
+        let style = GetWindowLongW(window.0, GWL_STYLE) as u32;
+        set_window_long_checked(
+            window.0,
+            GWL_STYLE,
+            (style | WS_DISABLED.0 | WS_HSCROLL.0) as i32,
+        )
+        .unwrap();
+    }
+    controller.restore_borders(window.value()).unwrap();
+    let style = unsafe { GetWindowLongW(window.0, GWL_STYLE) } as u32;
+    assert_eq!(
+        style & (WS_DISABLED.0 | WS_HSCROLL.0),
+        WS_DISABLED.0 | WS_HSCROLL.0
+    );
+    assert_eq!(style & BORDER_STYLES, WS_OVERLAPPEDWINDOW.0 & BORDER_STYLES);
+}
+
+#[test]
+fn hidden_pending_drag_is_acknowledged_and_can_restart() {
+    let window = Fixture::new(WS_POPUP);
+    let controller = WindowController::default();
+    controller.configure_drag_rules(vec![(window.value(), DragMode::Enabled)]);
+    let mut drag = controller
+        .begin_user_drag(window.value(), POINT::default())
+        .unwrap();
+    controller
+        .move_user_drag(&mut drag, POINT { x: 30, y: 40 })
+        .unwrap();
+    unsafe {
+        let _ = ShowWindow(window.0, SW_HIDE);
+    }
+    assert!(!controller.poll_user_drag(&mut drag).unwrap());
+    assert!(!WindowController::drag_move_pending(&drag));
+    unsafe {
+        let _ = ShowWindow(window.0, SW_SHOWNOACTIVATE);
+    }
+    assert!(
+        controller
+            .begin_user_drag(window.value(), POINT::default())
+            .is_some()
+    );
+}
+
+#[test]
+fn release_cursor_is_applied_after_previous_move_acknowledgement() {
+    let window = Fixture::new(WS_POPUP);
+    let controller = WindowController::default();
+    controller.configure_drag_rules(vec![(window.value(), DragMode::Enabled)]);
+    let mut drag = controller
+        .begin_user_drag(window.value(), POINT::default())
+        .unwrap();
+    let origin = drag.window_origin;
+    controller
+        .move_user_drag(&mut drag, POINT { x: 10, y: 10 })
+        .unwrap();
+    assert!(
+        controller
+            .finish_user_drag(&mut drag, POINT { x: 30, y: 50 })
+            .unwrap()
+    );
+    assert!(
+        !controller
+            .finish_user_drag(&mut drag, POINT { x: 30, y: 50 })
+            .unwrap()
+    );
+    let mut rect = RECT::default();
+    unsafe {
+        GetWindowRect(window.0, &mut rect).unwrap();
+    }
+    assert_eq!((rect.left, rect.top), (origin.x + 30, origin.y + 50));
+}
+
+#[test]
+fn minimized_pending_drag_is_acknowledged_and_can_restart() {
+    let window = Fixture::new(WS_POPUP);
+    let controller = WindowController::default();
+    controller.configure_drag_rules(vec![(window.value(), DragMode::Enabled)]);
+    let mut drag = controller
+        .begin_user_drag(window.value(), POINT::default())
+        .unwrap();
+    controller
+        .move_user_drag(&mut drag, POINT { x: 30, y: 40 })
+        .unwrap();
+    unsafe {
+        let _ = ShowWindow(window.0, SW_SHOWMINNOACTIVE);
+    }
+    assert!(!controller.poll_user_drag(&mut drag).unwrap());
+    assert!(!WindowController::drag_move_pending(&drag));
+    unsafe {
+        let _ = ShowWindow(window.0, SW_SHOWNOACTIVATE);
+    }
+    assert!(
+        controller
+            .begin_user_drag(window.value(), POINT::default())
+            .is_some()
+    );
+}
+
+#[test]
+fn hidden_pending_move_survives_scan_removal_until_acknowledged() {
+    let window = Fixture::new(WS_POPUP);
+    let controller = WindowController::default();
+    controller.configure_drag_rules(vec![(window.value(), DragMode::Enabled)]);
+    let mut original = RECT::default();
+    unsafe {
+        GetWindowRect(window.0, &mut original).unwrap();
+    }
+    let expected = (original.left + 40, original.top + 50);
+    {
+        let mut rules = controller.drag_rules.lock().unwrap();
+        let rule = rules.get_mut(&window.value()).unwrap();
+        rule.in_flight = true;
+        rule.pending = Some(PendingDragMove {
+            x: expected.0,
+            y: expected.1,
+            started: std::time::Instant::now(),
+        });
+    }
+    unsafe {
+        let _ = ShowWindow(window.0, SW_HIDE);
+    }
+    controller.configure_drag_rules(Vec::new());
+    assert!(
+        controller
+            .drag_rules
+            .lock()
+            .unwrap()
+            .get(&window.value())
+            .unwrap()
+            .in_flight
+    );
+    assert!(!controller.can_begin_drag(window.value()));
+    // Simulate the delayed owner acknowledgement without moving real input.
+    unsafe {
+        let _ = ShowWindow(window.0, SW_SHOWNOACTIVATE);
+    }
+    assert!(
+        !controller.has_strip_targets(),
+        "retaining an OS request must not intercept an unregistered window"
+    );
+    unsafe {
+        SetWindowPos(
+            window.0,
+            None,
+            expected.0,
+            expected.1,
+            0,
+            0,
+            SWP_NOACTIVATE | SWP_NOZORDER | SWP_NOSIZE,
+        )
+        .unwrap();
+    }
+    controller.configure_drag_rules(Vec::new());
+    assert!(
+        !controller
+            .drag_rules
+            .lock()
+            .unwrap()
+            .contains_key(&window.value())
+    );
+    unsafe {
+        let _ = ShowWindow(window.0, SW_SHOWNOACTIVATE);
+    }
+    controller.configure_drag_rules(vec![(window.value(), DragMode::Enabled)]);
+    assert!(
+        controller
+            .begin_user_drag(window.value(), POINT::default())
+            .is_some()
+    );
+}
+
+#[test]
+fn fixture_mouse_input_defers_native_clipping_without_changing_real_input() {
+    let window = Fixture::new_fixture(WS_OVERLAPPEDWINDOW, false, true);
+    let controller = WindowController::default();
+    unsafe {
+        SetPropW(
+            window.0,
+            w!("Bald.TestMouseState"),
+            Some(HANDLE(2usize as *mut c_void)),
+        )
+        .unwrap();
+    }
+    assert!(!controller.make_borderless(window.value()).unwrap());
+    unsafe {
+        SetPropW(
+            window.0,
+            w!("Bald.TestMouseState"),
+            Some(HANDLE(std::ptr::dangling_mut())),
+        )
+        .unwrap();
+    }
+    assert!(controller.make_borderless(window.value()).unwrap());
+    controller.restore_all_borders().unwrap();
 }
 
 #[test]
@@ -489,7 +799,7 @@ fn style_apply_and_restore_bypass_target_position_changing_callback() {
         SetPropW(
             window.0,
             w!("Bald.TestClampPosition"),
-            Some(HANDLE(1usize as *mut c_void)),
+            Some(HANDLE(std::ptr::dangling_mut::<c_void>())),
         )
         .unwrap();
     }
@@ -750,7 +1060,7 @@ fn recovered_legacy_region_markers_do_not_route_new_style_restore_to_clipping() 
         SetPropW(
             window.0,
             w!("Bald.ClippedFrame"),
-            Some(HANDLE(1usize as *mut c_void)),
+            Some(HANDLE(std::ptr::dangling_mut::<c_void>())),
         )
         .unwrap();
         SetPropW(
@@ -783,7 +1093,7 @@ fn style_restore_requires_actual_caption_not_only_style_bits() {
         SetPropW(
             window.0,
             w!("Bald.TestRejectNativeCaption"),
-            Some(HANDLE(1usize as *mut c_void)),
+            Some(HANDLE(std::ptr::dangling_mut::<c_void>())),
         )
         .unwrap();
     }
@@ -1113,7 +1423,12 @@ fn with_pumped_maple_fixture(test: impl FnOnce(&Fixture)) {
         unsafe { SetThreadDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2) };
     let (sender, receiver) = std::sync::mpsc::channel();
     let owner = std::thread::spawn(move || {
+        let previous =
+            unsafe { SetThreadDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2) };
         let window = Fixture::new_fixture(WS_OVERLAPPEDWINDOW, false, true);
+        unsafe {
+            windows::Win32::Graphics::Dwm::DwmFlush().unwrap();
+        }
         sender
             .send((window.value(), unsafe {
                 windows::Win32::System::Threading::GetCurrentThreadId()
@@ -1124,6 +1439,10 @@ fn with_pumped_maple_fixture(test: impl FnOnce(&Fixture)) {
             unsafe {
                 DispatchMessageW(&message);
             }
+        }
+        drop(window);
+        unsafe {
+            SetThreadDpiAwarenessContext(previous);
         }
     });
     let (value, thread_id) = receiver.recv().unwrap();
@@ -1428,9 +1747,29 @@ fn owner_position_constraint_is_not_bypassed_and_stalls_only_its_own_drag() {
     assert!(!controller.drag_allowed(window.value()));
     assert!(controller.drag_allowed(other.value()));
     assert!(controller.begin_user_drag(window.value(), cursor).is_none());
+    controller.set_window_drag_mode(window.value(), DragMode::Disabled);
+    controller.set_window_drag_mode(window.value(), DragMode::Enabled);
+    assert!(controller.begin_user_drag(window.value(), cursor).is_none());
     unsafe {
         let _ = RemovePropW(window.0, w!("Bald.TestClampPosition"));
+        SetWindowPos(
+            window.0,
+            None,
+            expected.x,
+            expected.y,
+            0,
+            0,
+            SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE,
+        )
+        .unwrap();
     }
+    // A late completion remains recoverable after the worker discarded its gesture.
+    controller.configure_drag_rules(vec![
+        (window.value(), DragMode::Enabled),
+        (other.value(), DragMode::Enabled),
+    ]);
+    assert!(controller.can_begin_drag(window.value()));
+    assert!(controller.begin_user_drag(window.value(), cursor).is_some());
     controller.restore_all_borders().unwrap();
 }
 

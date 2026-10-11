@@ -61,9 +61,12 @@ test('press captures the button and does not reach header dragging', () => {
   assert.doesNotMatch(fs.readFileSync('web/index.html', 'utf8'), /data-tauri-drag-region/);
 });
 
-test('native close and minimize reconcile visibility before their separate actions', () => {
+test('native close releases the WebView after saving geometry and minimize keeps it alive', () => {
   const native = fs.readFileSync('src/web_app.rs', 'utf8');
-  assert.match(native, /fn close_window\([^]*?sync_visible_window\(&window\)\?;\s*window\.hide\(\)/);
+  const close = native.slice(native.indexOf('fn close_window('), native.indexOf('fn sync_visible_window('));
+  assert.match(close, /UiWindowState::capture/);
+  assert.match(close, /ui_snapshot[^]*?snapshot\.hidden\(\)/);
+  assert.match(close, /window\.hide\(\)[^]*?window\.destroy\(\)/);
   assert.match(native, /fn minimize_window\([^]*?sync_visible_window\(&window\)\?;\s*window\.minimize\(\)/);
   const sync = native.slice(native.indexOf('fn sync_visible_window('), native.indexOf('fn start_window_drag('));
   assert.match(sync, /if window\.is_visible\(\)[^]*?window\.show\(\)/);

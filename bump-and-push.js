@@ -21,6 +21,8 @@ const packagePath = path.join(__dirname, 'package.json');
 
 const tauriPath = path.join(__dirname, 'tauri.conf.json');
 
+const lockPath = path.join(__dirname, 'package-lock.json');
+
 const cargoPath = path.join(__dirname, 'Cargo.toml');
 
 const pkg = JSON.parse(fs.readFileSync(packagePath, 'utf8'));
@@ -40,6 +42,14 @@ tauri.version = version;
 fs.writeFileSync(packagePath, `${JSON.stringify(pkg, null, 2)}\n`);
 
 fs.writeFileSync(tauriPath, `${JSON.stringify(tauri, null, 2)}\n`);
+
+const lock = JSON.parse(fs.readFileSync(lockPath, 'utf8'));
+
+lock.version = version;
+
+lock.packages[''].version = version;
+
+fs.writeFileSync(lockPath, `${JSON.stringify(lock, null, 2)}\n`);
 
 const cargo = fs.readFileSync(cargoPath, 'utf8').replace(/^version = "[^"]+"/m, `version = "${version}"`);
 

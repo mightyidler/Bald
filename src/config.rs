@@ -1,4 +1,8 @@
-use std::{fs, io::Write, path::PathBuf};
+use std::{
+    fs,
+    io::Write,
+    path::{Path, PathBuf},
+};
 
 use anyhow::{Context, Result};
 use directories::ProjectDirs;
@@ -11,7 +15,9 @@ use windows::{
 use crate::i18n::Language;
 use crate::rules::ApplicationRule;
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+static CONFIG_WRITES: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Config {
     pub version: u32,
@@ -57,15 +63,27 @@ impl Config {
     }
 
     pub fn save(&self) -> Result<()> {
-        let path = config_path();
+        self.save_to(&config_path())
+    }
+
+    pub(crate) fn save_to(&self, path: &Path) -> Result<()> {
+        let _write = CONFIG_WRITES.lock().unwrap();
         let parent = path.parent().context("configuration path has no parent")?;
         fs::create_dir_all(parent).context("create configuration directory")?;
-        let temp = path.with_extension("json.tmp");
+        let temp = path.with_extension(format!("{}.tmp", uuid::Uuid::new_v4()));
+        struct TemporaryFile(PathBuf);
+        impl Drop for TemporaryFile {
+            fn drop(&mut self) {
+                let _ = fs::remove_file(&self.0);
+            }
+        }
+        let cleanup = TemporaryFile(temp.clone());
         let bytes = serde_json::to_vec_pretty(self).context("serialize configuration")?;
         let mut file = fs::File::create(&temp).context("create temporary configuration")?;
         file.write_all(&bytes)
             .context("write temporary configuration")?;
         file.sync_all().context("flush temporary configuration")?;
+        drop(file);
         let temp_wide: Vec<u16> = temp
             .as_os_str()
             .to_string_lossy()
@@ -86,6 +104,7 @@ impl Config {
             )
             .context("replace configuration")?;
         }
+        drop(cleanup);
         Ok(())
     }
 }
@@ -112,4 +131,42 @@ fn migrate_legacy_config(new_path: &PathBuf) {
         let _ = fs::create_dir_all(parent);
     }
     let _ = fs::copy(old_path, new_path);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn concurrent_saves_are_complete_json_and_leave_no_temporary_files() {
+        let directory = std::env::temp_dir().join(format!("bald-save-{}", uuid::Uuid::new_v4()));
+        let path = directory.join("config.json");
+        std::thread::scope(|scope| {
+            for index in 0..12 {
+                let path = &path;
+                scope.spawn(move || {
+                    Config {
+                        theme: format!("test-{index}"),
+                        ..Config::default()
+                    }
+                    .save_to(path)
+                    .unwrap();
+                });
+            }
+        });
+        let saved: Config = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        assert!(saved.theme.starts_with("test-"));
+        assert_eq!(fs::read_dir(&directory).unwrap().count(), 1);
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn failed_replace_keeps_destination_and_cleans_temporary_file() {
+        let directory = std::env::temp_dir().join(format!("bald-save-{}", uuid::Uuid::new_v4()));
+        let path = directory.join("config.json");
+        fs::create_dir_all(&path).unwrap();
+        assert!(Config::default().save_to(&path).is_err());
+        assert!(path.is_dir());
+        assert_eq!(fs::read_dir(&directory).unwrap().count(), 1);
+        fs::remove_dir_all(directory).unwrap();
+    }
 }

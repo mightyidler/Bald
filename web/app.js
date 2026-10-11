@@ -4,6 +4,12 @@ const i18n={korean:{applications:"애플리케이션",settings:"동작",automati
 
 let state=null,windows=[],language="korean",theme="system",elevationRequested=false;
 
+let refreshRequest=null;
+
+let initialized=false;
+
+let uiVisible=false,refreshTimer=null,visibilityGeneration=0,elevationRetry=false;
+
 const $=s=>document.querySelector(s);
 
 let renderedApplicationsHtml="";
@@ -48,7 +54,7 @@ async function changeDragMode(button) {
     reportWindowError(error);
   } finally {
     button.disabled = false;
-    await refresh();
+    await refresh(true);
   }
 }
 
@@ -74,11 +80,15 @@ function showToast(message,duration=3000){const toast=$("#toast");toast.textCont
 
 function reportWindowError(error){showToast(`${language==="korean"?"창 적용·복구 실패":"Window apply/restore failed"}:\n${error}`,7000)}
 
+async function runConfigCommand(command,args){
+  try{await invoke(command,args)}catch(error){reportWindowError(error)}finally{await refresh(true)}
+}
+
 async function checkForUpdates(){const button=$("#btnCheckUpdate"),t=i18n[language];
 
 if(button.disabled)return;button.disabled=true;button.textContent=t.checking;
 
-try{const result=await invoke("check_for_updates_manual");showToast(result==="LATEST"?t.latest:result,3000)}catch(error){showToast(`${t.updateFailed}:\n${error}`,3000)}finally{button.disabled=false;button.textContent=t.checkUpdate}}
+try{const result=await invoke("check_for_updates_manual");showToast(result==="LATEST"?t.latest:result==="BUSY"?t.installing:result,3000)}catch(error){showToast(`${t.updateFailed}:\n${error}`,3000)}finally{button.disabled=false;button.textContent=t.checkUpdate}}
 
 const resetModal=$("#resetModal"),resetModalCard=resetModal.querySelector(".t-modal");
 
@@ -90,7 +100,7 @@ function closeResetModal(){const dim=$("#dim");dim.classList.remove("is-open");r
 
 async function removeHomeApplication(button){if(button.dataset.pending)return;button.dataset.pending="true";const row=button.closest(".app-row"),divider=row.previousElementSibling?.classList.contains("divider")?row.previousElementSibling:null;row.classList.add("is-removing");divider?.classList.add("is-removing");
 
-try{await waitForMotion(300);await invoke("remove_application",{id:button.dataset.remove});await refresh()}catch(error){row.classList.remove("is-removing");divider?.classList.remove("is-removing");delete button.dataset.pending;reportWindowError(error);await refresh()}}
+try{await waitForMotion(300);await invoke("remove_application",{id:button.dataset.remove});await refresh(true)}catch(error){row.classList.remove("is-removing");divider?.classList.remove("is-removing");delete button.dataset.pending;reportWindowError(error);await refresh(true)}}
 
 async function renderApplications() {
   const t = i18n[language], rules = state.config.applications;
@@ -146,21 +156,59 @@ if(element.textContent===next)return;const reduced=matchMedia("(prefers-reduced-
 
 async function togglePickerApplication(button,choice){if(button.dataset.pending)return;button.dataset.pending="true";const wasAdded=button.classList.contains("is-added"),rule=findAddedRule(choice);
 
-try{if(wasAdded&&rule)await invoke("remove_application",{id:rule.id});else if(!wasAdded)await invoke("add_application",{choice});state=await invoke("get_state");const isAdded=Boolean(findAddedRule(choice));button.classList.toggle("is-added",isAdded);button.querySelector(".t-icon-swap").dataset.state=isAdded?"b":"a";await swapPickerText(button,i18n[language][isAdded?"added":"add"]);await renderApplications()}finally{delete button.dataset.pending}}
+try{if(wasAdded&&rule)await invoke("remove_application",{id:rule.id});else if(!wasAdded)await invoke("add_application",{choice});
+
+if(!await refresh(true))return;const isAdded=Boolean(findAddedRule(choice));button.classList.toggle("is-added",isAdded);button.querySelector(".t-icon-swap").dataset.state=isAdded?"b":"a";await swapPickerText(button,i18n[language][isAdded?"added":"add"]);await renderApplications()}catch(error){reportWindowError(error)}finally{delete button.dataset.pending}}
 
 function renderPicker(){const t=i18n[language],query=$("#pickerSearch").value.trim().toLowerCase(),visible=windows.filter(w=>!query||w.title.toLowerCase().includes(query)||w.executableName.toLowerCase().includes(query));$("#pickerList").innerHTML=visible.map((w,index)=>{const added=Boolean(findAddedRule(w));
 
 return `<div class="picker-row">${applicationIcon(w.icon)}<div class="app-copy"><strong>${esc(w.title)}</strong><span>${esc(w.executableName)}</span></div><button class="add-one-btn t-resize${added?" is-added":""}" data-index="${index}">${pickerActionIcon(added)}<span class="t-text-swap picker-action-label">${added?t.added:t.add}</span></button></div>`}).join("")||`<div class="picker-empty">${t.empty}</div>`;document.querySelectorAll(".add-one-btn").forEach(button=>button.onclick=()=>togglePickerApplication(button,visible[Number(button.dataset.index)]))}
 
-async function openPicker(){windows=await invoke("list_windows");$("#pickerSearch").value="";renderPicker();$("#dim").classList.add("is-open");$("#picker").classList.add("is-open");$("#picker").setAttribute("aria-hidden","false");setTimeout(()=>$("#pickerSearch").focus(),360)}
+async function openPicker(){try{windows=await invoke("list_windows");$("#pickerSearch").value="";renderPicker();$("#dim").classList.add("is-open");$("#picker").classList.add("is-open");$("#picker").setAttribute("aria-hidden","false");setTimeout(()=>{if($("#picker").classList.contains("is-open"))$("#pickerSearch").focus()},360)}catch(error){reportWindowError(error)}}
 
 function clearPickerDrag(){const picker=$("#picker");picker.classList.remove("is-dragging","is-drag-settling","is-drag-closing");picker.style.removeProperty("--picker-drag-y");picker.style.removeProperty("--picker-drag-scale");picker.style.transform=""}
 
 function closePicker(){clearPickerDrag();$("#dim").classList.remove("is-open");$("#picker").classList.remove("is-open");$("#picker").setAttribute("aria-hidden","true")}
 
-async function refresh(){state=await invoke("get_state");language=state.config.language;theme=state.config.theme||"system";applyLanguage();$("#automaticToggle").checked=state.config.automatic_application;$("#startupToggle").checked=state.startupEnabled;await renderApplications();
+function refresh(afterChange=false){
+  if(refreshRequest)return afterChange?refreshRequest.then(()=>refresh()):refreshRequest;
+  refreshRequest=readState().catch(error=>{reportWindowError(error);
 
-if(!elevationRequested&&Object.values(state.statuses||{}).includes("requires_elevation")){elevationRequested=true;invoke("elevate_border_service").catch(reportWindowError)}}
+return null}).finally(()=>{refreshRequest=null});
+
+  return refreshRequest;
+}
+
+async function readState(){const first=!state,generation=visibilityGeneration,next=await invoke("get_state",{knownRevision:state?.revision});
+
+if(next.startupError&&next.startupError!==state?.startupError)reportWindowError(next.startupError);
+
+if(next.config){state=next;language=state.config.language;theme=state.config.theme||"system";applyLanguage();$("#automaticToggle").checked=state.config.automatic_application;$("#startupToggle").checked=state.startupEnabled;await renderApplications()}else if(state){state={...state,...next}}else{throw new Error("Initial settings are missing")}
+
+if(generation===visibilityGeneration)setUiVisibility(next.uiVisible,false);
+
+if(!elevationRequested&&Object.values(state.statuses||{}).includes("requires_elevation")){elevationRequested=true;invoke("elevate_border_service",{retry:elevationRetry}).catch(reportWindowError);elevationRetry=false}
+
+if(first&&initialized)revealContent().catch(reportWindowError);
+
+return state}
+
+function setUiVisibility(visible,immediate=true){
+  if(uiVisible===visible)return;
+  uiVisible=visible;visibilityGeneration++;clearTimeout(refreshTimer);refreshTimer=null;
+
+  if(visible){if(immediate)refresh().finally(scheduleRefresh);else scheduleRefresh()}
+}
+
+function scheduleRefresh(){
+  clearTimeout(refreshTimer);refreshTimer=null;
+
+  if(!uiVisible)return;
+  refreshTimer=setTimeout(async()=>{refreshTimer=null;
+
+    try{if(uiVisible&&!$("#picker").classList.contains("is-open"))await refresh()}finally{scheduleRefresh()}
+  },2000);
+}
 
 let openDD=null;
 
@@ -239,9 +287,9 @@ $("#dim").onclick=closePicker;
 
 $("#pickerSearch").oninput=renderPicker;
 
-$("#automaticToggle").onchange=async e=>{try{await invoke("set_automatic",{enabled:e.target.checked})}catch(error){reportWindowError(error)}finally{await refresh()}};
+$("#automaticToggle").onchange=e=>runConfigCommand("set_automatic",{enabled:e.target.checked});
 
-$("#startupToggle").onchange=async e=>{await invoke("set_startup",{enabled:e.target.checked});await refresh()};
+$("#startupToggle").onchange=e=>runConfigCommand("set_startup",{enabled:e.target.checked});
 
 $("#btnCheckUpdate").onclick=checkForUpdates;
 
@@ -249,9 +297,11 @@ $("#resetBtn").onclick=openResetModal;
 
 $("#resetCancel").onclick=closeResetModal;
 
-$("#resetConfirm").onclick=async()=>{closeResetModal();await invoke("reset_settings");await refresh()};
+$("#resetConfirm").onclick=()=>{closeResetModal();
 
-$("#exitBtn").onclick=()=>invoke("exit_app");
+return runConfigCommand("reset_settings")};
+
+$("#exitBtn").onclick=()=>invoke("exit_app").catch(reportWindowError);
 
 const pickerHead=$(".picker-head");
 
@@ -265,9 +315,13 @@ pickerHead.addEventListener("pointercancel",endPickerDrag);
 
 document.querySelectorAll(".dropdown-trigger").forEach(button=>button.onclick=e=>{e.stopPropagation();toggleDropdown(button.closest(".dropdown-wrap"))});
 
-document.querySelectorAll("[data-language]").forEach(item=>item.onclick=async e=>{e.stopPropagation();await invoke("set_language",{language:item.dataset.language});closeMenus();await refresh()});
+document.querySelectorAll("[data-language]").forEach(item=>item.onclick=e=>{e.stopPropagation();closeMenus();
 
-document.querySelectorAll("[data-theme]").forEach(item=>item.onclick=async e=>{e.stopPropagation();await invoke("set_theme",{theme:item.dataset.theme});closeMenus();await refresh()});
+return runConfigCommand("set_language",{language:item.dataset.language})});
+
+document.querySelectorAll("[data-theme]").forEach(item=>item.onclick=e=>{e.stopPropagation();closeMenus();
+
+return runConfigCommand("set_theme",{theme:item.dataset.theme})});
 
 let contentRevealGeneration = 0;
 
@@ -343,7 +397,7 @@ async function revealContent() {
 
 // Keep content ready while the native window is hidden; Explorer can reopen
 // the existing instance without emitting bald-window-reopened.
-window.addEventListener("bald-window-reopened", revealContent);
+window.addEventListener("bald-window-reopened",()=>{elevationRequested=false;elevationRetry=true;refresh().then(result=>{if(result)return revealContent()}).catch(reportWindowError)});
 
 function updateHeaderScroll(){
   $(".header").classList.toggle("is-scrolled", $(".main").scrollTop > 0);
@@ -371,11 +425,19 @@ return}
 
 if(e.key==="Escape"){closeMenus();closePicker()}});
 
-Promise.all([refresh(),invoke("get_app_version")]).then(([,version])=>$("#appVersionText").textContent=`v${version}`).catch(()=>$("#appVersionText").textContent="-").finally(revealContent);
+const initialVisibilityGeneration=visibilityGeneration;
 
-setInterval(async()=>{if(!$("#picker").classList.contains("is-open"))await refresh()},2000);
+Promise.all([refresh(),invoke("get_app_version"),invoke("get_ui_visibility")]).then(([,version,visible])=>{$("#appVersionText").textContent=version;
 
-$(".header").addEventListener("mousedown",e=>{if(e.button===0&&!e.target.closest("button"))invoke("start_window_drag")});
+if(initialVisibilityGeneration===visibilityGeneration)setUiVisibility(visible)}).catch(error=>{$("#appVersionText").textContent="-";reportWindowError(error)}).finally(()=>{initialized=true;
+
+if(state)revealContent().catch(reportWindowError)});
+
+window.__TAURI__.event.listen("bald-error",event=>reportWindowError(event.payload)).catch(reportWindowError);
+
+window.__TAURI__.event.listen("bald-ui-visible",event=>setUiVisibility(Boolean(event.payload))).catch(reportWindowError);
+
+$(".header").addEventListener("mousedown",e=>{if(e.button===0&&!e.target.closest("button"))invoke("start_window_drag").catch(reportWindowError)});
 
 // Keep the pressed button as the click target while its scale changes.
 function bindWindowAction(button,command){

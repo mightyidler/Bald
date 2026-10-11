@@ -798,6 +798,16 @@ Section Uninstall
   !insertmacro CheckIfAppIsRunning "$INSTDIR\${MAINBINARYNAME}.exe" "${PRODUCTNAME}"
 
   ; Delete the app directory and its content from disk
+  ${If} $UpdateMode <> 1
+    ; The executable checks the task action against its own absolute path.
+    nsExec::ExecToLog '$\"$INSTDIR\${MAINBINARYNAME}.exe$\" --remove-elevated-task'
+    Pop $0
+    ${If} $0 != 0
+      DetailPrint "Could not remove the owned elevated task (exit $0)."
+      SetErrorLevel 1
+      Abort "Remove the owned elevated task before uninstalling Bald."
+    ${EndIf}
+  ${EndIf}
   ; Copy main executable
   Delete "$INSTDIR\${MAINBINARYNAME}.exe"
 

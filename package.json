@@ -1,8 +1,9 @@
 {
   "name": "bald",
-  "version": "0.1.7",
+  "version": "0.1.8",
   "private": true,
   "scripts": {
+    "test": "node --test tests/*.test.cjs",
     "dev": "tauri dev",
     "build": "node build-signed.js",
     "build:unsigned": "tauri build",

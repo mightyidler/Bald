@@ -27,11 +27,13 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: '20'
+          node-version: '24'
           cache: npm
 
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
 
       - name: Cache Rust dependencies
         uses: actions/cache@v4
@@ -45,6 +47,30 @@ jobs:
 
       - name: Install dependencies
         run: npm ci
+
+      - name: Verify Rust formatting
+        run: cargo fmt --all -- --check
+
+      - name: Verify Rust Clippy
+        run: cargo clippy --all-targets -- -D warnings
+
+      - name: Run pure Rust regressions without desktop resources
+        run: pwsh -NoProfile -File tools/windows/test-pure.ps1
+
+      - name: Run Rust regressions on an isolated desktop
+        run: pwsh -NoProfile -File tools/windows/test-isolated.ps1 -Mode suite
+
+      - name: Run isolated worker lifecycle regression
+        run: pwsh -NoProfile -File tools/windows/test-isolated.ps1 -Mode worker
+
+      - name: Check release compilation
+        run: cargo check --release
+
+      - name: Verify JavaScript lint
+        run: npm run lint
+
+      - name: Run JavaScript regressions
+        run: npm test
 
       - name: Build, sign, and stage release
         uses: tauri-apps/tauri-action@v0

@@ -16,6 +16,9 @@ test("tray menu does not open on left click; only left double click opens Bald",
 test("Open menu and double click share show, restore and focus handling", () => {
   assert.match(tray, /"show" => open_main_window\(app\)/);
   const open = source.slice(source.indexOf("fn open_main_window("), source.indexOf("pub fn run("));
-  assert.match(open, /get_webview_window\("main"\)/);
+  assert.match(open, /create_main_window\(&queued\)/);
+  const creation = source.slice(source.indexOf("fn create_main_window("), source.indexOf("fn open_main_window("));
+  assert.match(creation, /get_webview_window\("main"\)/);
+  assert.match(creation, /WebviewWindowBuilder::from_config/);
   assert.match(open, /window\.show\(\);\s*let _ = window\.unminimize\(\);\s*let _ = window\.set_focus\(\);/);
 });

@@ -1,0 +1,6 @@
+{
+  "identifier": "main-events",
+  "description": "Receive backend visibility and error events in the settings window.",
+  "windows": ["main"],
+  "permissions": ["core:event:allow-listen", "core:event:allow-unlisten"]
+}

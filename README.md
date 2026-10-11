@@ -10,7 +10,7 @@ and removes the standard Windows frame whenever their top-level window appears.
 - idempotent border removal that preserves geometry;
 - session-aware border restoration;
 - automatic watcher with a low-frequency reconciliation pass;
-- global and per-app enable switches;
+- a global automatic-application switch and per-app drag settings;
 - per-user Windows startup registration;
 - close-to-tray and single-instance behavior.
 

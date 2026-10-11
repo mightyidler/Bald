@@ -2,7 +2,7 @@
 use std::{
     collections::HashMap,
     io::{Read, Write},
-    net::{SocketAddr, TcpListener, TcpStream},
+    net::{Shutdown, SocketAddr, TcpListener, TcpStream},
     sync::{Arc, RwLock},
     time::{Duration, Instant},
 };
@@ -23,6 +23,7 @@ const MAX_MESSAGE: usize = 1024 * 1024;
 #[derive(Serialize, Deserialize)]
 enum Request {
     Initialize(Config),
+    Activate,
     Sync(Config),
     Status,
     Restore(Option<ApplicationRule>),
@@ -36,7 +37,7 @@ struct Response {
     error: Option<String>,
 }
 
-fn write_message<T: Serialize>(stream: &mut TcpStream, message: &T) -> Result<()> {
+fn write_message<T: Serialize>(stream: &mut impl Write, message: &T) -> Result<()> {
     let bytes = serde_json::to_vec(message)?;
     if bytes.len() > MAX_MESSAGE {
         bail!("border service message too large");
@@ -46,7 +47,7 @@ fn write_message<T: Serialize>(stream: &mut TcpStream, message: &T) -> Result<()
     Ok(())
 }
 
-fn read_message<T: DeserializeOwned>(stream: &mut TcpStream) -> Result<T> {
+fn read_message<T: DeserializeOwned>(stream: &mut impl Read) -> Result<T> {
     let mut length = [0; 4];
     stream.read_exact(&mut length)?;
     let length = u32::from_le_bytes(length) as usize;
@@ -58,24 +59,86 @@ fn read_message<T: DeserializeOwned>(stream: &mut TcpStream) -> Result<T> {
     Ok(serde_json::from_slice(&bytes)?)
 }
 
+#[cfg(test)]
+mod pure_codec_tests {
+    use super::*;
+    use std::io::Cursor;
+
+    #[test]
+    fn framed_responses_roundtrip_in_memory_including_service_errors() {
+        let response = Response {
+            error: Some("restore failed".into()),
+            ..Response::default()
+        };
+        let mut bytes = Vec::new();
+        write_message(&mut bytes, &response).unwrap();
+        let decoded: Response = read_message(&mut Cursor::new(bytes)).unwrap();
+        assert_eq!(decoded.error, response.error);
+        assert!(decoded.statuses.is_empty());
+    }
+
+    #[test]
+    fn truncated_or_invalid_frames_fail_without_socket_or_worker() {
+        let mut bytes = Vec::new();
+        write_message(&mut bytes, &Response::default()).unwrap();
+        for end in 0..bytes.len() {
+            assert!(read_message::<Response>(&mut Cursor::new(&bytes[..end])).is_err());
+        }
+        let mut invalid = Cursor::new([1, 0, 0, 0, b'{']);
+        assert!(read_message::<Response>(&mut invalid).is_err());
+    }
+
+    #[test]
+    fn oversized_frames_fail_before_reading_payload_or_writing_header() {
+        let mut bytes = ((MAX_MESSAGE + 1) as u32).to_le_bytes().to_vec();
+        bytes.extend_from_slice(b"unread payload");
+        let mut input = Cursor::new(bytes);
+        assert!(read_message::<Response>(&mut input).is_err());
+        assert_eq!(input.position(), 4);
+        let mut output = Vec::new();
+        assert!(write_message(&mut output, &"x".repeat(MAX_MESSAGE + 1)).is_err());
+        assert!(output.is_empty());
+    }
+}
+
 struct Local {
     config: Arc<RwLock<Config>>,
     statuses: Arc<RwLock<HashMap<Uuid, RuleStatus>>>,
     controller: WindowController,
     watcher: Option<Watcher>,
+    elevation: Option<std::sync::mpsc::SyncSender<bool>>,
 }
 
 impl Local {
-    fn new(config: Config) -> Self {
+    fn new(config: Config, elevation: Option<std::sync::mpsc::SyncSender<bool>>) -> Self {
+        let mut local = Self::prepared(config);
+        local.elevation = elevation;
+        local.start();
+        local
+    }
+
+    fn prepared(config: Config) -> Self {
         let config = Arc::new(RwLock::new(config));
         let statuses = Arc::new(RwLock::new(HashMap::new()));
         let controller = WindowController::default();
-        let watcher = Watcher::start(config.clone(), statuses.clone(), controller.clone());
         Self {
             config,
             statuses,
             controller,
-            watcher: Some(watcher),
+            watcher: None,
+            elevation: None,
+        }
+    }
+
+    fn start(&mut self) {
+        if self.watcher.is_none() {
+            self.controller.resume();
+            self.watcher = Some(Watcher::start_with_elevation(
+                self.config.clone(),
+                self.statuses.clone(),
+                self.controller.clone(),
+                self.elevation.clone(),
+            ));
         }
     }
 
@@ -100,6 +163,39 @@ impl Local {
 
 struct Remote {
     stream: TcpStream,
+    healthy: bool,
+    process: Option<WorkerProcess>,
+}
+
+struct WorkerProcess(isize);
+impl WorkerProcess {
+    fn exited(&self) -> bool {
+        use windows::Win32::{
+            Foundation::{HANDLE, WAIT_OBJECT_0},
+            System::Threading::WaitForSingleObject,
+        };
+        unsafe { WaitForSingleObject(HANDLE(self.0 as *mut _), 0) == WAIT_OBJECT_0 }
+    }
+
+    fn wait(&self) -> Result<()> {
+        use windows::Win32::{
+            Foundation::{HANDLE, WAIT_OBJECT_0},
+            System::Threading::WaitForSingleObject,
+        };
+        if unsafe { WaitForSingleObject(HANDLE(self.0 as *mut _), 30_000) } != WAIT_OBJECT_0 {
+            bail!("worker exit not confirmed; local window management remains paused");
+        }
+        Ok(())
+    }
+}
+impl Drop for WorkerProcess {
+    fn drop(&mut self) {
+        unsafe {
+            let _ = windows::Win32::Foundation::CloseHandle(windows::Win32::Foundation::HANDLE(
+                self.0 as *mut _,
+            ));
+        }
+    }
 }
 
 fn prepare_worker_handshake(stream: &TcpStream) -> Result<()> {
@@ -112,18 +208,84 @@ fn prepare_worker_handshake(stream: &TcpStream) -> Result<()> {
 }
 
 impl Remote {
+    fn connected(stream: TcpStream) -> Self {
+        Self {
+            stream,
+            healthy: true,
+            process: None,
+        }
+    }
+
     fn request(&mut self, request: Request) -> Result<Response> {
-        write_message(&mut self.stream, &request)?;
-        let response: Response = read_message(&mut self.stream)?;
+        let timeout = if matches!(request, Request::Restore(_) | Request::Shutdown) {
+            Duration::from_secs(60)
+        } else {
+            Duration::from_secs(5)
+        };
+        self.request_with_timeout(request, timeout)
+    }
+
+    fn request_with_timeout(&mut self, request: Request, timeout: Duration) -> Result<Response> {
+        if !self.healthy {
+            bail!("border service disconnected; retry elevation to recover");
+        }
+        let result = (|| {
+            let deadline = Instant::now() + timeout;
+            let bytes = serde_json::to_vec(&request)?;
+            if bytes.len() > MAX_MESSAGE {
+                bail!("border service message too large");
+            }
+            let mut frame = (bytes.len() as u32).to_le_bytes().to_vec();
+            frame.extend_from_slice(&bytes);
+            let mut remaining = frame.as_slice();
+            while !remaining.is_empty() {
+                self.stream
+                    .set_write_timeout(Some(time_remaining(deadline)?))?;
+                let written = self.stream.write(remaining)?;
+                if written == 0 {
+                    bail!("border service closed during write");
+                }
+                remaining = &remaining[written..];
+            }
+            let mut length = [0; 4];
+            read_before(&mut self.stream, &mut length, deadline)?;
+            let length = u32::from_le_bytes(length) as usize;
+            if length > MAX_MESSAGE {
+                bail!("border service message too large");
+            }
+            let mut bytes = vec![0; length];
+            read_before(&mut self.stream, &mut bytes, deadline)?;
+            Ok::<_, anyhow::Error>(serde_json::from_slice::<Response>(&bytes)?)
+        })();
+        let response = match result {
+            Ok(response) => response,
+            Err(error) => {
+                self.healthy = false;
+                let _ = self.stream.shutdown(Shutdown::Both);
+                return Err(error.context("border service transport failed"));
+            }
+        };
         if let Some(error) = &response.error {
             bail!("{error}");
         }
         Ok(response)
     }
 
+    fn retire(&mut self) -> Result<()> {
+        self.healthy = false;
+        let _ = self.stream.shutdown(Shutdown::Both);
+        self.process
+            .as_ref()
+            .context("worker ownership cannot be confirmed")?
+            .wait()
+    }
+
     fn launch() -> Result<Self> {
         use windows::{
-            Win32::UI::{Shell::ShellExecuteW, WindowsAndMessaging::SW_HIDE},
+            Win32::UI::{
+                Shell::{SEE_MASK_NOCLOSEPROCESS, SHELLEXECUTEINFOW, ShellExecuteExW},
+                WindowsAndMessaging::SW_HIDE,
+            },
             core::PCWSTR,
         };
         let listener = TcpListener::bind("127.0.0.1:0")?;
@@ -145,19 +307,22 @@ impl Remote {
         .chain(Some(0))
         .collect();
         let operation: Vec<u16> = "runas\0".encode_utf16().collect();
-        let result = unsafe {
-            ShellExecuteW(
-                None,
-                PCWSTR(operation.as_ptr()),
-                PCWSTR(executable.as_ptr()),
-                PCWSTR(arguments.as_ptr()),
-                None,
-                SW_HIDE,
-            )
+        let mut launch = SHELLEXECUTEINFOW {
+            cbSize: std::mem::size_of::<SHELLEXECUTEINFOW>() as u32,
+            fMask: SEE_MASK_NOCLOSEPROCESS,
+            lpVerb: PCWSTR(operation.as_ptr()),
+            lpFile: PCWSTR(executable.as_ptr()),
+            lpParameters: PCWSTR(arguments.as_ptr()),
+            nShow: SW_HIDE.0,
+            ..Default::default()
         };
-        if result.0 as isize <= 32 {
-            bail!("elevation request failed: {}", result.0 as isize);
+        unsafe {
+            ShellExecuteExW(&mut launch).context("elevation request failed")?;
         }
+        if launch.hProcess.0.is_null() {
+            bail!("elevated worker process handle missing");
+        }
+        let process = WorkerProcess(launch.hProcess.0 as isize);
         let deadline = Instant::now() + Duration::from_secs(30);
         while Instant::now() < deadline {
             match listener.accept() {
@@ -169,7 +334,9 @@ impl Remote {
                     stream.set_read_timeout(Some(Duration::from_secs(60)))?;
                     stream.set_write_timeout(Some(Duration::from_secs(60)))?;
                     stream.set_nodelay(true)?;
-                    return Ok(Self { stream });
+                    let mut remote = Self::connected(stream);
+                    remote.process = Some(process);
+                    return Ok(remote);
                 }
                 Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
                     std::thread::sleep(Duration::from_millis(50));
@@ -187,19 +354,23 @@ pub struct BorderService {
 }
 
 impl BorderService {
-    pub fn new(config: Config) -> Self {
+    pub fn new(config: Config, elevation: Option<std::sync::mpsc::SyncSender<bool>>) -> Self {
         Self {
-            local: Some(Local::new(config)),
+            local: Some(Local::new(config, elevation)),
             remote: None,
         }
     }
 
     pub fn sync(&mut self, config: Config) -> Result<()> {
+        self.recover_disconnected_worker()?;
         if let Some(remote) = &mut self.remote {
-            remote.request(Request::Sync(config))?;
-        } else if let Some(local) = &self.local {
+            remote.request(Request::Sync(config.clone()))?;
+        }
+        if let Some(local) = &self.local {
             *local.config.write().unwrap() = config;
-            if let Some(watcher) = &local.watcher {
+            if self.remote.is_none()
+                && let Some(watcher) = &local.watcher
+            {
                 watcher.notify();
             }
         }
@@ -207,8 +378,15 @@ impl BorderService {
     }
 
     pub fn statuses(&mut self) -> Result<HashMap<Uuid, RuleStatus>> {
+        self.recover_disconnected_worker()?;
         if let Some(remote) = &mut self.remote {
-            Ok(remote.request(Request::Status)?.statuses)
+            match remote.request(Request::Status) {
+                Ok(response) => Ok(response.statuses),
+                Err(error) => {
+                    self.recover_disconnected_worker()?;
+                    Err(error)
+                }
+            }
         } else {
             Ok(self
                 .local
@@ -238,13 +416,10 @@ impl BorderService {
             remote.request(Request::Drag(rule))?;
         } else {
             let local = self.local.as_ref().context("border service stopped")?;
-            for window in enumerate_windows().into_iter().filter(|window| {
-                rule.matches(window)
-                    && rule
-                        .window_class_hint
-                        .as_ref()
-                        .is_none_or(|class| class.eq_ignore_ascii_case(&window.class_name))
-            }) {
+            for window in enumerate_windows()
+                .into_iter()
+                .filter(|window| rule.matches_automatic_window(window))
+            {
                 local
                     .controller
                     .set_window_drag_mode(window.hwnd, rule.drag_mode);
@@ -257,36 +432,103 @@ impl BorderService {
     }
 
     pub fn elevate(&mut self, config: Config) -> Result<()> {
-        if self.remote.is_some() {
+        if self.remote.as_ref().is_some_and(|remote| remote.healthy) {
             return Ok(());
         }
+        self.recover_disconnected_worker()?;
         let remote = Remote::launch()?;
-        // A cancelled UAC or launch failure leaves the existing owner intact.
-        if let Some(local) = &mut self.local {
-            let guard = local.config.write().unwrap();
-            local.controller.restore_all_borders()?;
-            local.controller.begin_shutdown();
-            drop(guard);
-            drop(local.watcher.take());
+        self.handoff(remote, config)
+    }
+
+    pub(crate) fn recover_disconnected_worker(&mut self) -> Result<()> {
+        if let Some(remote) = &mut self.remote
+            && remote.process.as_ref().is_some_and(WorkerProcess::exited)
+        {
+            remote.healthy = false;
         }
-        self.local = None;
+        if let Some(remote) = &mut self.remote
+            && !remote.healthy
+        {
+            remote.retire()?;
+            self.remote = None;
+            if let Some(local) = &mut self.local {
+                local.start();
+            }
+        }
+        Ok(())
+    }
+
+    fn handoff(&mut self, mut remote: Remote, config: Config) -> Result<()> {
+        // Prepare the worker without starting a second frame owner.
+        remote.request(Request::Initialize(config.clone()))?;
+        // A cancelled UAC or launch failure leaves the existing owner intact.
+        if let Some(local) = &mut self.local
+            && let Err(error) = local.shutdown()
+        {
+            local.start();
+            return Err(error);
+        }
         self.remote = Some(remote);
-        self.remote
-            .as_mut()
-            .unwrap()
-            .request(Request::Initialize(config))?;
+        if let Err(error) = self.remote.as_mut().unwrap().request(Request::Activate) {
+            self.remote.as_mut().unwrap().retire()?;
+            self.remote = None;
+            if let Some(local) = &mut self.local {
+                local.start();
+            }
+            return Err(error);
+        }
         Ok(())
     }
 
     pub fn shutdown(&mut self) -> Result<()> {
-        if let Some(mut remote) = self.remote.take() {
-            remote.request(Request::Shutdown)?;
+        if let Some(remote) = &mut self.remote {
+            if remote.healthy {
+                let result = remote.request(Request::Shutdown);
+                // A framed restoration error retains the worker's snapshots
+                // for retry. Transport failure instead requires confirmed exit.
+                if remote.healthy {
+                    result?;
+                }
+            }
+            remote.retire()?;
         }
+        self.remote = None;
         if let Some(local) = &mut self.local {
             local.shutdown()?;
         }
         Ok(())
     }
+
+    pub(crate) fn resume(&mut self) -> Result<()> {
+        if self.remote.is_some() {
+            bail!("remote owner still active");
+        }
+        self.local
+            .as_mut()
+            .context("local service missing")?
+            .start();
+        Ok(())
+    }
+}
+
+fn time_remaining(deadline: Instant) -> Result<Duration> {
+    let remaining = deadline.saturating_duration_since(Instant::now());
+    if remaining.is_zero() {
+        bail!("border service request deadline exceeded");
+    }
+    Ok(remaining)
+}
+
+fn read_before(stream: &mut TcpStream, mut bytes: &mut [u8], deadline: Instant) -> Result<()> {
+    while !bytes.is_empty() {
+        stream.set_read_timeout(Some(time_remaining(deadline)?))?;
+        let read = stream.read(bytes)?;
+        if read == 0 {
+            bail!("border service closed during response");
+        }
+        bytes = &mut bytes[read..];
+    }
+    Ok(())
 }
 
 impl Drop for BorderService {
@@ -313,7 +555,9 @@ pub fn run_worker(address: &str, token: &str) -> Result<()> {
     write_message(&mut stream, &token)?;
     // Preserve the installed app's existing elevated startup path. This only
     // affects future launches, never replaces the UI connected to this worker.
-    let _ = crate::startup::ensure_elevated_task();
+    if let Err(error) = crate::startup::ensure_elevated_task() {
+        eprintln!("elevated startup registration failed: {error}");
+    }
     let mut service: Option<BorderService> = None;
     // A disconnected UI ends this loop; Drop restores all managed windows.
     while let Ok(request) = read_message::<Request>(&mut stream) {
@@ -323,11 +567,19 @@ pub fn run_worker(address: &str, token: &str) -> Result<()> {
                 if service.is_some() {
                     bail!("border service already initialized");
                 }
-                service = Some(BorderService::new(config));
+                service = Some(BorderService {
+                    local: Some(Local::prepared(config)),
+                    remote: None,
+                });
                 return Ok(HashMap::new());
             }
             let service = service.as_mut().context("border service not initialized")?;
             match request {
+                Request::Activate => service
+                    .local
+                    .as_mut()
+                    .context("local service missing")?
+                    .start(),
                 Request::Sync(config) => service.sync(config)?,
                 Request::Status => return service.statuses(),
                 Request::Restore(rule) => service.restore(rule)?,
@@ -337,6 +589,7 @@ pub fn run_worker(address: &str, token: &str) -> Result<()> {
             }
             Ok(HashMap::new())
         })();
+        let shutdown = shutdown && result.is_ok();
         let response = match result {
             Ok(statuses) => Response {
                 statuses,
@@ -358,6 +611,231 @@ pub fn run_worker(address: &str, token: &str) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn partial_response_disconnect_invalidates_stream_before_next_request() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let mut remote =
+            Remote::connected(TcpStream::connect(listener.local_addr().unwrap()).unwrap());
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            read_message::<Request>(&mut stream).unwrap();
+            stream.write_all(&[20, 0]).unwrap();
+        });
+        assert!(remote.request(Request::Status).is_err());
+        server.join().unwrap();
+        assert!(!remote.healthy);
+        let started = Instant::now();
+        assert!(remote.request(Request::Status).is_err());
+        assert!(started.elapsed() < Duration::from_millis(100));
+    }
+
+    #[test]
+    fn response_deadline_includes_partial_reads_and_closes_connection() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let mut remote =
+            Remote::connected(TcpStream::connect(listener.local_addr().unwrap()).unwrap());
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            read_message::<Request>(&mut stream).unwrap();
+            let _ = stream.write_all(&[20, 0]);
+            std::thread::sleep(Duration::from_millis(150));
+        });
+        assert!(
+            remote
+                .request_with_timeout(Request::Status, Duration::from_millis(40))
+                .is_err()
+        );
+        assert!(!remote.healthy);
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn initialization_failure_preserves_existing_owner_and_configuration() {
+        let config = Config::default();
+        let mut service = BorderService {
+            local: Some(Local::prepared(config.clone())),
+            remote: None,
+        };
+        let controller = service.local.as_ref().unwrap().controller.clone();
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let remote = Remote::connected(TcpStream::connect(listener.local_addr().unwrap()).unwrap());
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            assert!(matches!(
+                read_message::<Request>(&mut stream).unwrap(),
+                Request::Initialize(_)
+            ));
+            write_message(
+                &mut stream,
+                &Response {
+                    error: Some("initialize rejected".into()),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        });
+        assert!(service.handoff(remote, config.clone()).is_err());
+        server.join().unwrap();
+        assert!(service.remote.is_none());
+        assert_eq!(
+            *service.local.as_ref().unwrap().config.read().unwrap(),
+            config
+        );
+        assert!(
+            controller.begin_shutdown(),
+            "initialization failure must not shut down the previous owner"
+        );
+    }
+
+    #[test]
+    fn prepared_worker_has_no_watcher_or_frame_owner_before_activation() {
+        let local = Local::prepared(Config::default());
+        assert!(local.watcher.is_none());
+        assert!(local.controller.managed_windows().is_empty());
+    }
+
+    #[test]
+    fn disconnected_status_does_not_resume_without_worker_ownership() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let mut remote =
+            Remote::connected(TcpStream::connect(listener.local_addr().unwrap()).unwrap());
+        remote.healthy = false;
+        let mut service = BorderService {
+            local: Some(Local::prepared(Config::default())),
+            remote: Some(remote),
+        };
+        assert!(
+            service
+                .statuses()
+                .unwrap_err()
+                .to_string()
+                .contains("ownership")
+        );
+        assert!(service.remote.is_some());
+        assert!(service.local.as_ref().unwrap().watcher.is_none());
+    }
+
+    #[test]
+    fn status_disconnect_resumes_local_only_after_owned_process_exit() {
+        use std::os::windows::{
+            io::{AsHandle, IntoRawHandle},
+            process::CommandExt,
+        };
+        let mut child = std::process::Command::new("cmd.exe")
+            .args(["/D", "/Q"])
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .creation_flags(0x08000000)
+            .spawn()
+            .unwrap();
+        let process = child.as_handle().try_clone_to_owned().unwrap();
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let mut remote =
+            Remote::connected(TcpStream::connect(listener.local_addr().unwrap()).unwrap());
+        remote.process = Some(WorkerProcess(process.into_raw_handle() as isize));
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            assert!(matches!(
+                read_message::<Request>(&mut stream).unwrap(),
+                Request::Status
+            ));
+            child
+                .stdin
+                .take()
+                .unwrap()
+                .write_all(b"exit /b 0\r\n")
+                .unwrap();
+            assert!(child.wait().unwrap().success());
+        });
+        let mut service = BorderService {
+            local: Some(Local::prepared(Config {
+                automatic_application: false,
+                ..Config::default()
+            })),
+            remote: Some(remote),
+        };
+        assert!(
+            service.statuses().is_err(),
+            "the original transport failure remains visible"
+        );
+        server.join().unwrap();
+        assert!(service.remote.is_none());
+        assert!(service.local.as_ref().unwrap().watcher.is_some());
+        assert!(service.statuses().is_ok());
+    }
+
+    #[test]
+    fn exited_worker_is_recovered_without_ui_status_polling() {
+        use std::os::windows::{
+            io::{AsHandle, IntoRawHandle},
+            process::CommandExt,
+        };
+        let mut child = std::process::Command::new("cmd.exe")
+            .args(["/c", "exit", "0"])
+            .creation_flags(0x08000000)
+            .spawn()
+            .unwrap();
+        let process = child.as_handle().try_clone_to_owned().unwrap();
+        assert!(child.wait().unwrap().success());
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let mut remote =
+            Remote::connected(TcpStream::connect(listener.local_addr().unwrap()).unwrap());
+        remote.process = Some(WorkerProcess(process.into_raw_handle() as isize));
+        let mut service = BorderService {
+            local: Some(Local::prepared(Config {
+                automatic_application: false,
+                ..Config::default()
+            })),
+            remote: Some(remote),
+        };
+        service.recover_disconnected_worker().unwrap();
+        assert!(service.remote.is_none());
+        assert!(service.local.as_ref().unwrap().watcher.is_some());
+        assert!(service.statuses().is_ok());
+    }
+
+    #[test]
+    fn activation_failure_never_restarts_local_without_confirmed_worker_exit() {
+        let mut service = BorderService {
+            local: Some(Local::prepared(Config::default())),
+            remote: None,
+        };
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let remote = Remote::connected(TcpStream::connect(listener.local_addr().unwrap()).unwrap());
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            assert!(matches!(
+                read_message::<Request>(&mut stream).unwrap(),
+                Request::Initialize(_)
+            ));
+            write_message(&mut stream, &Response::default()).unwrap();
+            assert!(matches!(
+                read_message::<Request>(&mut stream).unwrap(),
+                Request::Activate
+            ));
+            write_message(
+                &mut stream,
+                &Response {
+                    error: Some("activation failed".into()),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        });
+        assert!(
+            service
+                .handoff(remote, Config::default())
+                .unwrap_err()
+                .to_string()
+                .contains("ownership cannot be confirmed")
+        );
+        server.join().unwrap();
+        assert!(!service.remote.as_ref().unwrap().healthy);
+        assert!(service.local.as_ref().unwrap().watcher.is_none());
+        assert!(!service.local.as_ref().unwrap().controller.begin_shutdown());
+    }
 
     fn pump_fixture_messages() {
         use windows::Win32::UI::WindowsAndMessaging::{
@@ -417,9 +895,7 @@ mod tests {
             )
             .unwrap();
         });
-        let mut remote = Remote {
-            stream: TcpStream::connect(address).unwrap(),
-        };
+        let mut remote = Remote::connected(TcpStream::connect(address).unwrap());
         assert_eq!(
             remote.request(Request::Status).unwrap().statuses[&id],
             RuleStatus::Borderless
@@ -547,6 +1023,7 @@ mod tests {
             let mut ui = crate::ui_window_state::UiWindowState::capture(fixtures.0).unwrap();
             let original_style = GetWindowLongPtrW(fixtures.1, GWL_STYLE);
             let info = crate::window_manager::WindowInfo {
+                process_id: std::process::id(),
                 hwnd: fixtures.1.0 as isize,
                 title: "Bald fixture game".to_owned(),
                 executable_name: std::env::current_exe()
@@ -602,8 +1079,9 @@ mod tests {
             stream
                 .set_read_timeout(Some(Duration::from_secs(15)))
                 .unwrap();
-            let mut remote = Remote { stream };
+            let mut remote = Remote::connected(stream);
             pumped_request(&mut remote, Request::Initialize(config.clone()));
+            pumped_request(&mut remote, Request::Activate);
             for cycle in 0..3 {
                 if cycle == 1 {
                     let _ = ShowWindow(fixtures.0, SW_SHOWMINNOACTIVE);

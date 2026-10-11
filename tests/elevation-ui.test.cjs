@@ -4,7 +4,7 @@ const test = require("node:test");
 
 test("elevation starts a window-only service without replacing or touching the UI", () => {
   const source = fs.readFileSync("src/web_app.rs", "utf8");
-  const command = source.slice(source.indexOf("async fn elevate_border_service("), source.indexOf("fn capture_ui_state("));
+  const command = source.slice(source.indexOf("async fn elevate_border_service("), source.indexOf("fn ui_visible("));
   assert.match(command, /spawn_blocking/);
   assert.match(command, /service\.elevate\(snapshot\)/);
   assert.doesNotMatch(command, /get_webview_window|app\.exit|capture_ui_state|\.hide\(|\.show\(|set_focus|restart_arguments/);
@@ -12,6 +12,6 @@ test("elevation starts a window-only service without replacing or touching the U
   assert.ok(main.indexOf("border_service::run_worker") < main.indexOf("SingleInstance::acquire"));
   assert.ok(main.indexOf("border_service::run_worker") < main.indexOf("launch_elevated_task"));
   const frontend = fs.readFileSync("web/app.js", "utf8");
-  assert.match(frontend, /invoke\("elevate_border_service"\)/);
+  assert.match(frontend, /invoke\("elevate_border_service",\{retry:elevationRetry\}\)/);
   assert.doesNotMatch(frontend, /restart_as_admin/);
 });

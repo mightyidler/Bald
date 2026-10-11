@@ -48,13 +48,14 @@ unsafe extern "system" fn first_group(
     name: PCWSTR,
     state: isize,
 ) -> windows::core::BOOL {
-    if let Some(data) = resource_bytes(module, name, kind) {
-        if data.len() >= 6 && data[0..4] == [0, 0, 1, 0] {
-            unsafe {
-                *(state as *mut Option<Vec<u8>>) = Some(data);
-            }
-            return false.into();
+    if let Some(data) = resource_bytes(module, name, kind)
+        && data.len() >= 6
+        && data[0..4] == [0, 0, 1, 0]
+    {
+        unsafe {
+            *(state as *mut Option<Vec<u8>>) = Some(data);
         }
+        return false.into();
     }
     true.into()
 }
@@ -93,32 +94,107 @@ pub(super) fn from_executable(path: &str) -> Option<ExecutableIcon> {
     if count == 0 || count > 256 || group.len() < 6 + count * 14 {
         return None;
     }
-    let mut candidates = Vec::new();
-    for entry in group[6..6 + count * 14].chunks_exact(14) {
-        let id = u16::from_le_bytes([entry[12], entry[13]]);
-        let Some(raw) = resource_bytes(module.0, PCWSTR(id as usize as *const u16), RT_ICON) else {
-            continue;
-        };
-        // Reconstruct a one-image ICO directory around the unscaled resource.
-        let mut ico = vec![0, 0, 1, 0, 1, 0];
-        ico.extend_from_slice(&entry[..8]);
-        ico.extend_from_slice(&(raw.len() as u32).to_le_bytes());
-        ico.extend_from_slice(&22u32.to_le_bytes());
-        ico.extend_from_slice(&raw);
-        let mut reader = image::ImageReader::with_format(Cursor::new(ico), image::ImageFormat::Ico);
-        let mut limits = image::Limits::default();
-        limits.max_image_width = Some(512);
-        limits.max_image_height = Some(512);
-        limits.max_alloc = Some(4 * 1024 * 1024);
-        reader.limits(limits);
-        if let Ok(decoded) = reader.decode() {
-            let rgba = decoded.into_rgba8();
-            candidates.push(ExecutableIcon {
-                width: rgba.width(),
-                height: rgba.height(),
-                rgba: rgba.into_raw(),
-            });
-        }
-    }
+    let candidates = group[6..6 + count * 14]
+        .chunks_exact(14)
+        .filter_map(|entry| {
+            let id = u16::from_le_bytes([entry[12], entry[13]]);
+            let raw = resource_bytes(module.0, PCWSTR(id as usize as *const u16), RT_ICON)?;
+            // Reconstruct a one-image ICO directory around the unscaled resource.
+            let mut ico = vec![0, 0, 1, 0, 1, 0];
+            ico.extend_from_slice(&entry[..8]);
+            ico.extend_from_slice(&(raw.len() as u32).to_le_bytes());
+            ico.extend_from_slice(&22u32.to_le_bytes());
+            ico.extend_from_slice(&raw);
+            let mut reader =
+                image::ImageReader::with_format(Cursor::new(ico), image::ImageFormat::Ico);
+            let mut limits = image::Limits::default();
+            limits.max_image_width = Some(512);
+            limits.max_image_height = Some(512);
+            limits.max_alloc = Some(4 * 1024 * 1024);
+            reader.limits(limits);
+            reader.decode().ok().map(|decoded| {
+                let rgba = decoded.into_rgba8();
+                ExecutableIcon {
+                    width: rgba.width(),
+                    height: rgba.height(),
+                    rgba: rgba.into_raw(),
+                }
+            })
+        });
     best_native_icon(candidates)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[repr(C)]
+    struct MemoryCounters {
+        size: u32,
+        faults: u32,
+        values: [usize; 9],
+    }
+    #[link(name = "kernel32")]
+    unsafe extern "system" {
+        fn K32GetProcessMemoryInfo(
+            process: *mut std::ffi::c_void,
+            counters: *mut MemoryCounters,
+            size: u32,
+        ) -> i32;
+    }
+    fn private_bytes() -> usize {
+        let mut counters = MemoryCounters {
+            size: std::mem::size_of::<MemoryCounters>() as u32,
+            faults: 0,
+            values: [0; 9],
+        };
+        assert_ne!(
+            unsafe {
+                K32GetProcessMemoryInfo(
+                    windows::Win32::System::Threading::GetCurrentProcess().0,
+                    &mut counters,
+                    std::mem::size_of::<MemoryCounters>() as u32,
+                )
+            },
+            0
+        );
+        counters.values[8]
+    }
+
+    #[test]
+    fn streamed_icon_selection_preserves_pixels_and_reduces_retained_candidate_memory() {
+        let icon = |index: u8| {
+            let mut rgba = vec![255; 512 * 512 * 4];
+            rgba[0] = index;
+            ExecutableIcon {
+                width: 512,
+                height: 512,
+                rgba,
+            }
+        };
+        let baseline = private_bytes();
+        let candidates: Vec<_> = (0..64).map(icon).collect();
+        let collected = private_bytes().saturating_sub(baseline);
+        let previous = best_native_icon(candidates).unwrap();
+        let baseline = private_bytes();
+        let mut peak = baseline;
+        let streamed = best_native_icon((0..64).map(|index| {
+            let value = icon(index);
+            peak = peak.max(private_bytes());
+            value
+        }))
+        .unwrap();
+        assert_eq!(
+            (previous.width, previous.height, &previous.rgba),
+            (streamed.width, streamed.height, &streamed.rgba)
+        );
+        assert_eq!(
+            streamed.rgba[0], 63,
+            "equal-size tie keeps the last candidate"
+        );
+        println!(
+            "icon_candidate_memory: collected_private_delta={collected}, streamed_private_peak_delta={}",
+            peak.saturating_sub(baseline)
+        );
+    }
 }

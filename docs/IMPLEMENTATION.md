@@ -10,7 +10,7 @@ the real game's client to its outer size; an owner-thread asynchronous
 `SWP_FRAMECHANGED | SWP_ASYNCWINDOWPOS` restores native client geometry without
 minimizing, hiding, activating, or resizing it. Both application and restoration
 use this refresh and confirm geometry before success. Drag interception uses the
-visible client top 12 physical pixels, and centering accounts for hidden frame
+visible client top 16 physical pixels, and centering accounts for hidden frame
 offsets. Other classes retain their existing style-removal path.
 
 `ihateborders` 1.1.1 was inspected and built successfully on 2026-10-03.
@@ -32,16 +32,19 @@ Bald preserves that proven operation but deliberately differs in two ways:
 
 Original styles, process identity, frame insets and managed regions are kept in
 memory and keyed by HWND. They are never serialized because an HWND is meaningful only for the
-current window instance. Turning off either the global automatic switch or a
-per-application switch restores all matching windows changed in this session.
+current window instance. Turning off the global automatic switch or removing a
+registered application restores matching windows changed in this session.
 
 ## Current watcher
 
 The watcher blocks in GetMessage and wakes on coalesced WinEvent/configuration
 requests or a four-second fallback timer. Managed game size changes and the end
-of native window movement request reconciliation; ordinary movement does not.
+of tracked window movement request reconciliation. Location events still request
+a scan; the four-second reconciliation remains as a safety check.
 There is no idle 16ms polling loop. While a drag position request is outstanding,
 the separate worker checks acknowledgement every 16ms, stopping after 100ms.
+An unacknowledged OS move retains ownership until its completion or HWND/PID
+invalidation; changing a drag mode cannot cancel a queued native operation.
 The mouse hook consumes only approved top-strip presses/releases; movement passes through.
 
 ## Game compatibility and verification
@@ -63,7 +66,7 @@ posted OS request cannot be cancelled.
 Rules offer only Allowed and Blocked, defaulting to Blocked. Old `auto` values
 deserialize as Blocked and serialize as `disabled`; no automatic movement
 classification, caption hit testing, or native move confirmation is retained.
-Only the top twelve physical pixels of an allowed window intercept drag clicks.
+Only the top sixteen physical pixels of an allowed window intercept drag clicks.
 Blocked borderless windows consume presses/releases in that same strip so the
 game cannot start its own drag there. The hook remains installed when all rules
 are Blocked. Input below that strip still passes through, including any game-owned
@@ -76,10 +79,10 @@ configuration never recenter. Outstanding moves reject centering rather than
 queueing conflicting positions; unacknowledged centering reports an error.
 Dragging a registered, already-borderless window does not require frame restoration
 ownership in the current session, without guessing restoration styles or adopting
-old ownership. The same 12px strip and live HWND/process, geometry and mode guards
+old ownership. The same 16px strip and live HWND/process, geometry and mode guards
 apply whether or not an original frame snapshot exists.
 Only already-active windows can begin a custom drag. A rejected/unacknowledged request suspends that window's
-custom dragging until its mode changes, without disabling other windows.
+custom dragging until its pending operation is acknowledged, without disabling other windows.
 Original region-based fixtures remain test-only; legacy restoration handling is
 retained without automatically rewriting an un-restored legacy window.
 Win32 regression fixtures cover native APIs without touching live games; actual
@@ -98,3 +101,38 @@ Configuration is JSON in the per-user application config directory. Writes go
 to a temporary file, are flushed, and are then renamed over the active file.
 Rules prefer a normalized executable path, fall back to the executable filename,
 and use the selected window class as a discriminator.
+
+Configuration changes and their saves share a serialization lock. Each save uses
+a unique temporary file. Memory commits only after persistence and service/startup
+application succeed; failed application attempts roll back disk and native settings
+and report any rollback failure. Theme/language changes do not rescan game windows.
+
+## Settings WebView lifetime
+
+Background startup creates the tray and watcher without a settings WebView. An
+invisible native activation window receives second-instance open requests. Opening
+settings creates the WebView; closing snapshots its geometry and destroys it.
+Recreation reads current configuration and reapplies the saved geometry. Minimized
+window placements are converted from workspace to screen coordinates before reuse.
+The activation callback holds only a weak application reference, so shutdown still
+releases the service and restores owned frames. Minimize alone retains the WebView.
+
+UI polling runs only while the settings window is visible and not minimized, with
+at most one state request in flight. An unchanged revision omits configuration and
+icons. Elevation detection runs on the native watcher even when no UI exists.
+
+Executable icon extraction is serialized per path, retains at most 128 cache
+entries and 8MiB of encoded images, and briefly caches failures for 30 seconds.
+Resource selection decodes candidates one at a time and retains the best cropped
+image without changing its pixels or equal-size tie selection.
+
+On an actively used PC, run `pwsh -NoProfile -File tools/windows/test-pure.ps1`.
+It compiles the test harness and runs only a reviewed allowlist of memory-only
+logic and mock tests, without windows, hooks, Shell, services, or file replacement.
+JavaScript tests use mock IPC and source fixtures; `npm test` does not run the app.
+
+The full `cargo test` suite uses real Windows resources. Native regression tests
+can run through `tools/windows/test-isolated.ps1`, and the worker test uses its
+separate `-Mode worker` invocation, only in an environment allowing native tests.
+An invisible desktop still shares system resources and is unsuitable when such
+testing is prohibited. Installer execution and real-game validation are separate.
