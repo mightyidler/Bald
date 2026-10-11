@@ -217,7 +217,8 @@ try {
     if ((Get-FileHash -LiteralPath $settingsPath).Hash -ne $settingsHash) { throw 'Installer changed user settings.' }
     Write-Output 'PASS: isolated user settings survive install, update and uninstall.'
 } finally {
-    Uninstall-TestApp
+    if (Test-Path -LiteralPath (Join-Path $installPath 'bald.exe')) { Uninstall-TestApp }
+    Assert-Uninstalled
     # NSIS _?= keeps the running uninstaller at its original path. Remove only
     # explicitly named test files/directories after checking their resolved scope.
     if ([IO.Path]::GetDirectoryName([IO.Path]::GetFullPath($installPath)) -ne $env:LOCALAPPDATA) { throw 'Unexpected cleanup path.' }
