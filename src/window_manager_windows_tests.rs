@@ -8,10 +8,11 @@ use windows::Win32::{
     UI::{
         HiDpi::{DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2, SetThreadDpiAwarenessContext},
         WindowsAndMessaging::{
-            CreateWindowExW, DefWindowProcW, DestroyWindow, NCCALCSIZE_PARAMS, RegisterClassW,
-            STYLESTRUCT, SW_HIDE, SW_SHOWMINNOACTIVE, SW_SHOWNOACTIVATE, SetWindowTextW,
-            ShowWindow, WINDOWPOS, WM_NCCALCSIZE, WM_STYLECHANGED, WM_WINDOWPOSCHANGING, WNDCLASSW,
-            WS_EX_NOACTIVATE, WS_OVERLAPPEDWINDOW, WS_POPUP, WS_VISIBLE,
+            CreateWindowExW, DefWindowProcW, DestroyWindow, MINMAXINFO, NCCALCSIZE_PARAMS,
+            RegisterClassW, STYLESTRUCT, SW_HIDE, SW_SHOWMINNOACTIVE, SW_SHOWNOACTIVATE,
+            SetWindowTextW, ShowWindow, WINDOWPOS, WM_GETMINMAXINFO, WM_NCCALCSIZE,
+            WM_STYLECHANGED, WM_WINDOWPOSCHANGING, WNDCLASSW, WS_EX_NOACTIVATE,
+            WS_OVERLAPPEDWINDOW, WS_POPUP, WS_VISIBLE,
         },
     },
 };
@@ -237,6 +238,17 @@ unsafe extern "system" fn region_sensitive_proc(
     lparam: LPARAM,
 ) -> windows::Win32::Foundation::LRESULT {
     let sticky = unsafe { !GetPropW(hwnd, w!("Bald.TestStickyFrame")).0.is_null() };
+    if message == WM_GETMINMAXINFO
+        && unsafe { !GetPropW(hwnd, w!("Bald.TestLargeResolution")).0.is_null() }
+    {
+        // Keep resolution fixtures independent of the CI monitor's dimensions.
+        unsafe {
+            let limits = &mut *(lparam.0 as *mut MINMAXINFO);
+            limits.ptMaxTrackSize.x = 4096;
+            limits.ptMaxTrackSize.y = 4096;
+        }
+        return windows::Win32::Foundation::LRESULT(0);
+    }
     if message == WM_WINDOWPOSCHANGING
         && unsafe { !GetPropW(hwnd, w!("Bald.TestCountRestoreSizes")).0.is_null() }
         && unsafe { (*(lparam.0 as *const WINDOWPOS)).flags.0 & SWP_NOSIZE.0 == 0 }
@@ -1924,6 +1936,14 @@ fn region_sensitive_game_restoration_preserves_render_size_and_origin() {
 #[test]
 fn region_sensitive_resolution_changes_do_not_crop_or_expand_content() {
     let window = Fixture::new_kind(WS_OVERLAPPEDWINDOW, true);
+    unsafe {
+        SetPropW(
+            window.0,
+            w!("Bald.TestLargeResolution"),
+            Some(HANDLE(std::ptr::dangling_mut())),
+        )
+        .unwrap();
+    }
     let controller = WindowController::default();
     let mut outer = RECT::default();
     unsafe {
