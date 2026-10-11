@@ -185,7 +185,7 @@ fn high_resolution_executable_icon(path: &str) -> Option<ExecutableIcon> {
         if lines == 0 {
             return None;
         }
-        for pixel in rgba.chunks_exact_mut(4) {
+        for pixel in rgba.as_chunks_mut::<4>().0 {
             pixel.swap(0, 2);
         }
         Some(crop_transparent_padding(ExecutableIcon {
@@ -264,7 +264,7 @@ fn legacy_executable_icon(path: &str) -> Option<ExecutableIcon> {
         let _ = DeleteDC(dc);
         let _ = DestroyIcon(info.hIcon);
         drawn.then(|| {
-            for pixel in bgra.chunks_exact_mut(4) {
+            for pixel in bgra.as_chunks_mut::<4>().0 {
                 pixel.swap(0, 2);
                 if pixel[3] == 0 && (pixel[0] != 0 || pixel[1] != 0 || pixel[2] != 0) {
                     pixel[3] = 255;

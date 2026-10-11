@@ -65,7 +65,13 @@ pub(super) fn best_native_icon(
 ) -> Option<ExecutableIcon> {
     candidates
         .into_iter()
-        .filter(|icon| icon.rgba.chunks_exact(4).any(|pixel| pixel[3] > 8))
+        .filter(|icon| {
+            icon.rgba
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .any(|pixel| pixel[3] > 8)
+        })
         .map(crop_transparent_padding)
         .max_by_key(|icon| u64::from(icon.width) * u64::from(icon.height))
 }
@@ -95,7 +101,9 @@ pub(super) fn from_executable(path: &str) -> Option<ExecutableIcon> {
         return None;
     }
     let candidates = group[6..6 + count * 14]
-        .chunks_exact(14)
+        .as_chunks::<14>()
+        .0
+        .iter()
         .filter_map(|entry| {
             let id = u16::from_le_bytes([entry[12], entry[13]]);
             let raw = resource_bytes(module.0, PCWSTR(id as usize as *const u16), RT_ICON)?;
