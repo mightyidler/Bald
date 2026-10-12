@@ -1,6 +1,6 @@
 [package]
 name = "bald"
-version = "0.1.8"
+version = "0.1.9"
 edition = "2024"
 license = "GPL-3.0-only"
 description = "A quiet Windows tray utility that removes borders from selected applications"
@@ -17,6 +17,7 @@ tauri-plugin-updater = "2.10.0"
 uuid = { version = "1.18", features = ["v4", "serde"] }
 windows = { version = "0.61", features = [
     "Win32_Foundation",
+    "Win32_Globalization",
     "Win32_Graphics_Gdi",
     "Win32_Graphics_Dwm",
     "Win32_Security",

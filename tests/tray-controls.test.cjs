@@ -4,7 +4,7 @@ const path = require("node:path");
 const test = require("node:test");
 
 const source = fs.readFileSync(path.join(__dirname, "../src/web_app.rs"), "utf8");
-const tray = source.slice(source.indexOf("TrayIconBuilder::new()"), source.indexOf(".build(app)?;"));
+const tray = source.slice(source.indexOf('TrayIconBuilder::with_id("main")'), source.indexOf(".build(app)?;"));
 
 test("tray menu does not open on left click; only left double click opens Bald", () => {
   assert.match(tray, /\.show_menu_on_left_click\(false\)/);

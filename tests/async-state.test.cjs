@@ -20,8 +20,8 @@ function refreshFixture(invoke) {
   const refresh = source.slice(source.indexOf('function refresh('), source.indexOf('let openDD='));
   vm.runInContext(`let refreshRequest=null,state=null,language='korean',theme='system',initialized=false,elevationRequested=false,
     visibilityGeneration=0,uiVisible=false,refreshTimer=null,elevationRetry=false; ${refresh}
-    globalThis.refresh = refresh; globalThis.savedState = () => state;`, context);
-  return { refresh: context.refresh, savedState: context.savedState, setVisible: context.setUiVisibility, errors, automatic, startup,
+    globalThis.refresh = refresh; globalThis.savedState = () => state; globalThis.currentLanguage = () => language;`, context);
+  return { refresh: context.refresh, savedState: context.savedState, currentLanguage: context.currentLanguage, setVisible: context.setUiVisibility, errors, automatic, startup,
     timers, renders: () => renders, languages: () => languages,
     fireNext: () => { const [id, callback] = timers.entries().next().value; timers.delete(id); return callback(); } };
 }
@@ -49,6 +49,19 @@ test('unchanged status responses preserve settings and skip language and applica
   assert.equal(view.savedState().config.theme, 'dark');
   assert.equal(view.savedState().statuses.a, 'running');
   assert.equal(view.renders(), 1); assert.equal(view.languages(), 1);
+});
+
+test('the saved initial language is displayed and preserved on later polling', async () => {
+  let calls = 0;
+  const view = refreshFixture(async () => ++calls === 1 ? {
+    ...snapshot(), config: { ...snapshot().config, language: 'japanese' }
+  } : { revision: 1, statuses: {}, uiVisible: false });
+  await view.refresh();
+  assert.equal(view.savedState().config.language, 'japanese');
+  assert.equal(view.currentLanguage(), 'japanese');
+  await view.refresh();
+  assert.equal(view.currentLanguage(), 'japanese');
+  assert.equal(view.languages(), 1);
 });
 
 test('hidden UI stops polling, reopening refreshes immediately, and slow requests never overlap', async () => {

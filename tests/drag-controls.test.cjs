@@ -17,7 +17,7 @@ function controls(invoke) {
     closeMenus: () => {}
   });
 
-  vm.runInContext(`${prefix}\nglobalThis.controls = { renderDragControl, changeDragMode, i18n };`, context);
+  vm.runInContext(`${fs.readFileSync('web/i18n.js', 'utf8')}\n${prefix}\nglobalThis.controls = { renderDragControl, changeDragMode, i18n };`, context);
 
   return { ...context.controls, errors, refreshes: () => refreshes };
 }

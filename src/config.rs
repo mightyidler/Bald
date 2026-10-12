@@ -23,7 +23,10 @@ pub struct Config {
     pub version: u32,
     pub automatic_application: bool,
     pub startup_enabled: bool,
+    #[serde(default)]
     pub language: Language,
+    #[serde(default = "legacy_manual_language")]
+    pub language_manually_selected: bool,
     pub theme: String,
     pub applications: Vec<ApplicationRule>,
 }
@@ -34,7 +37,8 @@ impl Default for Config {
             version: 3,
             automatic_application: true,
             startup_enabled: true,
-            language: Language::default(),
+            language: Language::detect(),
+            language_manually_selected: false,
             theme: "system".to_owned(),
             applications: Vec::new(),
         }
@@ -45,16 +49,53 @@ impl Config {
     pub fn load() -> Self {
         let path = config_path();
         migrate_legacy_config(&path);
-        match fs::read_to_string(&path) {
+        Self::load_from(&path, Language::detect())
+    }
+
+    fn load_from(path: &Path, system_language: Language) -> Self {
+        match fs::read_to_string(path) {
             Ok(contents) => {
-                let mut config = serde_json::from_str(&contents).unwrap_or_else(|error| {
-                    eprintln!("Could not parse {}: {error}", path.display());
-                    Self::default()
-                });
+                let mut config: Self = match serde_json::from_str(&contents) {
+                    Ok(config) => config,
+                    Err(error) => {
+                        eprintln!("Could not parse {}: {error}", path.display());
+                        return Self {
+                            language: system_language,
+                            ..Self::default()
+                        };
+                    }
+                };
                 config.version = 3;
+                let legacy_system = config.language == Language::LegacySystem;
+                if legacy_system {
+                    config.language_manually_selected = false;
+                }
+                if legacy_system
+                    || (!config.language_manually_selected && config.language != system_language)
+                {
+                    config.language = system_language;
+                    if let Err(error) = config.save_to(path) {
+                        eprintln!(
+                            "Could not save Windows language to {}: {error}",
+                            path.display()
+                        );
+                    }
+                }
                 config
             }
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Self::default(),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                let config = Self {
+                    language: system_language,
+                    ..Self::default()
+                };
+                if let Err(error) = config.save_to(path) {
+                    eprintln!(
+                        "Could not save initial settings to {}: {error}",
+                        path.display()
+                    );
+                }
+                config
+            }
             Err(error) => {
                 eprintln!("Could not read {}: {error}", path.display());
                 Self::default()
@@ -64,6 +105,11 @@ impl Config {
 
     pub fn save(&self) -> Result<()> {
         self.save_to(&config_path())
+    }
+
+    pub fn select_language(&mut self, language: Language) {
+        self.language = language;
+        self.language_manually_selected = true;
     }
 
     pub(crate) fn save_to(&self, path: &Path) -> Result<()> {
@@ -109,6 +155,11 @@ impl Config {
     }
 }
 
+// Older concrete language values represent a user's existing choice.
+fn legacy_manual_language() -> bool {
+    true
+}
+
 pub fn config_path() -> PathBuf {
     ProjectDirs::from("app", "Bald", "Bald")
         .map(|dirs| dirs.config_dir().join("config.json"))
@@ -136,6 +187,111 @@ fn migrate_legacy_config(new_path: &PathBuf) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn automatic_selection_follows_windows_on_later_launches() {
+        let directory =
+            std::env::temp_dir().join(format!("bald-language-{}", uuid::Uuid::new_v4()));
+        let path = directory.join("config.json");
+        let config = Config::load_from(&path, Language::Korean);
+        assert_eq!(config.language, Language::Korean);
+        assert!(!config.language_manually_selected);
+        let saved: Config = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        assert_eq!(saved, config);
+        let changed = Config::load_from(&path, Language::Japanese);
+        assert_eq!(changed.language, Language::Japanese);
+        assert!(!changed.language_manually_selected);
+        let saved: Config = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        assert_eq!(saved, changed);
+        let bytes = fs::read(&path).unwrap();
+        assert_eq!(Config::load_from(&path, Language::Japanese), changed);
+        assert_eq!(fs::read(&path).unwrap(), bytes);
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn manual_choices_including_current_language_survive_windows_changes() {
+        let directory =
+            std::env::temp_dir().join(format!("bald-language-{}", uuid::Uuid::new_v4()));
+        let path = directory.join("config.json");
+        for selected in [Language::Korean, Language::English] {
+            let mut config = Config {
+                language: Language::Korean,
+                ..Config::default()
+            };
+            config.select_language(selected);
+            config.theme = "dark".into();
+            config.save_to(&path).unwrap();
+            let bytes = fs::read(&path).unwrap();
+            assert!(config.language_manually_selected);
+            assert_eq!(Config::load_from(&path, Language::Japanese), config);
+            assert_eq!(fs::read(&path).unwrap(), bytes);
+        }
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn legacy_system_and_missing_language_follow_windows_without_losing_settings() {
+        let directory =
+            std::env::temp_dir().join(format!("bald-language-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&directory).unwrap();
+        let path = directory.join("config.json");
+        for legacy in [
+            r#"{"language":"system","theme":"dark","startup_enabled":false}"#,
+            r#"{"theme":"dark","startup_enabled":false}"#,
+        ] {
+            fs::write(&path, legacy).unwrap();
+            let config = Config::load_from(&path, Language::Korean);
+            assert_eq!(config.language, Language::Korean);
+            assert!(!config.language_manually_selected);
+            assert_eq!(config.theme, "dark");
+            assert!(!config.startup_enabled);
+            let bytes = fs::read(&path).unwrap();
+            let saved: Config = serde_json::from_slice(&bytes).unwrap();
+            assert_eq!(saved, config);
+            assert_eq!(Config::load_from(&path, Language::Korean), config);
+            assert_eq!(fs::read(&path).unwrap(), bytes);
+            let changed = Config::load_from(&path, Language::Japanese);
+            assert_eq!(changed.language, Language::Japanese);
+            assert_eq!(changed.theme, "dark");
+            assert!(!changed.startup_enabled);
+            assert!(!changed.language_manually_selected);
+        }
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn legacy_concrete_languages_remain_manual_choices() {
+        let directory =
+            std::env::temp_dir().join(format!("bald-language-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&directory).unwrap();
+        let path = directory.join("config.json");
+        for language in ["korean", "english"] {
+            let legacy = format!(r#"{{"language":"{language}","theme":"dark"}}"#);
+            fs::write(&path, &legacy).unwrap();
+            let config = Config::load_from(&path, Language::Japanese);
+            assert!(config.language_manually_selected);
+            assert_eq!(serde_json::to_value(config.language).unwrap(), language);
+            assert_eq!(config.theme, "dark");
+            assert_eq!(fs::read_to_string(&path).unwrap(), legacy);
+        }
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn malformed_settings_are_not_overwritten_by_language_detection() {
+        let directory =
+            std::env::temp_dir().join(format!("bald-language-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&directory).unwrap();
+        let path = directory.join("config.json");
+        fs::write(&path, "invalid settings").unwrap();
+        let config = Config::load_from(&path, Language::Japanese);
+        assert_eq!(config.language, Language::Japanese);
+        assert!(!config.language_manually_selected);
+        assert_eq!(fs::read_to_string(&path).unwrap(), "invalid settings");
+        fs::remove_dir_all(directory).unwrap();
+    }
+
     #[test]
     fn concurrent_saves_are_complete_json_and_leave_no_temporary_files() {
         let directory = std::env::temp_dir().join(format!("bald-save-{}", uuid::Uuid::new_v4()));

@@ -13,6 +13,8 @@ and removes the standard Windows frame whenever their top-level window appears.
 - a global automatic-application switch and per-app drag settings;
 - per-user Windows startup registration;
 - close-to-tray and single-instance behavior.
+- 12 UI languages that follow Windows at startup until a language is manually selected
+  ([localization details](docs/localization.md)).
 
 ## Build
 

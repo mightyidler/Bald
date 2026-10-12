@@ -383,11 +383,15 @@ async fn set_automatic(enabled: bool, app: AppHandle) -> Result<(), String> {
 
 #[tauri::command]
 async fn set_language(language: Language, app: AppHandle) -> Result<(), String> {
-    change_config(app, move |config| {
-        config.language = language;
+    if language == Language::LegacySystem {
+        return Err("unsupported language".to_owned());
+    }
+    change_config(app.clone(), move |config| {
+        config.select_language(language);
         Ok(())
     })
-    .await
+    .await?;
+    update_tray_language(&app)
 }
 
 #[tauri::command]
@@ -413,11 +417,12 @@ async fn set_startup(enabled: bool, app: AppHandle) -> Result<(), String> {
 
 #[tauri::command]
 async fn reset_settings(app: AppHandle) -> Result<(), String> {
-    change_config(app, |config| {
+    change_config(app.clone(), |config| {
         *config = Config::default();
         Ok(())
     })
-    .await
+    .await?;
+    update_tray_language(&app)
 }
 
 #[tauri::command]
@@ -675,6 +680,23 @@ async fn install_background_update(app: tauri::AppHandle) {
     }
 }
 
+fn tray_menu(app: &AppHandle) -> tauri::Result<Menu<tauri::Wry>> {
+    let language = app.state::<AppState>().config.read().unwrap().language;
+    let (show_label, quit_label) = language.tray_labels();
+    let show = MenuItem::with_id(app, "show", show_label, true, None::<&str>)?;
+    let quit = MenuItem::with_id(app, "quit", quit_label, true, None::<&str>)?;
+    Menu::with_items(app, &[&show, &quit])
+}
+
+fn update_tray_language(app: &AppHandle) -> Result<(), String> {
+    if let Some(tray) = app.tray_by_id("main") {
+        let menu = tray_menu(app).map_err(|error| error.to_string())?;
+        tray.set_menu(Some(menu))
+            .map_err(|error| error.to_string())?;
+    }
+    Ok(())
+}
+
 fn create_main_window(app: &AppHandle) -> anyhow::Result<tauri::WebviewWindow> {
     if let Some(window) = app.get_webview_window("main") {
         return Ok(window);
@@ -855,10 +877,8 @@ pub fn run(instance: SingleInstance) -> anyhow::Result<()> {
                 install_background_update(updater_app).await;
             });
 
-            let show = MenuItem::with_id(app, "show", "열기", true, None::<&str>)?;
-            let quit = MenuItem::with_id(app, "quit", "종료", true, None::<&str>)?;
-            let menu = Menu::with_items(app, &[&show, &quit])?;
-            TrayIconBuilder::new()
+            let menu = tray_menu(app.handle())?;
+            TrayIconBuilder::with_id("main")
                 .icon(app.default_window_icon().unwrap().clone())
                 .tooltip("Bald")
                 .menu(&menu)

@@ -1,6 +1,6 @@
 const invoke=window.__TAURI__.core.invoke;
 
-const i18n={korean:{applications:"애플리케이션",settings:"동작",automatic:"테두리 자동 제거",automaticDesc:"등록한 애플리케이션의 테두리를 자동으로 제거합니다",startup:"Windows 시작 시 Bald 실행",startupDesc:"Windows에 로그인하면 Bald를 실행합니다",environment:"개인 설정",language:"언어",theme:"테마",themeSystem:"시스템",themeLight:"라이트 모드",themeDark:"다크 모드",updates:"업데이트",currentVersion:"현재 버전",checkUpdate:"업데이트 확인",checking:"확인 중...",latest:"최신 버전입니다",installing:"업데이트 설치 중...",updateFailed:"확인 실패",addApplication:"애플리케이션 추가",search:"실행 중인 애플리케이션 검색",empty:"선택할 수 있는 애플리케이션이 없습니다.",add:"추가",added:"추가됨",reset:"설정 초기화",resetTitle:"설정 초기화",resetDesc:"모든 설정을 기본값으로 되돌리고 등록한 애플리케이션을 목록에서 제거합니다.",resetTargetLabel:"초기화 대상",resetTargetDesc:"테두리 자동 제거, 시작 프로그램, 언어, 테마와 등록된 애플리케이션 설정이 초기화됩니다.",resetSafetyLabel:"안전 장치",resetSafetyDesc:"현재 적용된 테두리는 복원되며 애플리케이션이나 개인 파일은 삭제되지 않습니다.",cancel:"취소",resetConfirm:"설정 초기화",exit:"Bald 종료"},english:{applications:"Applications",settings:"Behavior",automatic:"Automatic border removal",automaticDesc:"Automatically removes borders from registered applications",startup:"Launch Bald with Windows",startupDesc:"Starts Bald when you sign in to Windows",environment:"Preferences",language:"Language",theme:"Theme",themeSystem:"System",themeLight:"Light mode",themeDark:"Dark mode",updates:"Updates",currentVersion:"Current version",checkUpdate:"Check for updates",checking:"Checking...",latest:"Up to date",installing:"Installing update...",updateFailed:"Check failed",addApplication:"Add application",search:"Search running applications",empty:"No applications are available to select.",add:"Add",added:"Added",reset:"Reset settings",resetTitle:"Reset settings",resetDesc:"Restore every setting to its default and remove all registered applications from the list.",resetTargetLabel:"Will be reset",resetTargetDesc:"Automatic border removal, startup, language, theme, and registered application settings will be reset.",resetSafetyLabel:"Safety",resetSafetyDesc:"Applied borders will be restored. Applications and personal files will not be deleted.",cancel:"Cancel",resetConfirm:"Reset settings",exit:"Exit Bald"}};
+const { languages, i18n } = window.BaldI18n;
 
 let state=null,windows=[],language="korean",theme="system",elevationRequested=false;
 
@@ -13,22 +13,6 @@ let uiVisible=false,refreshTimer=null,visibilityGeneration=0,elevationRetry=fals
 const $=s=>document.querySelector(s);
 
 let renderedApplicationsHtml="";
-
-Object.assign(i18n.korean, {
-  windowDrag: "창 이동",
-  dragEnabled: "허용",
-  dragDisabled: "차단",
-  dragAllowedLabel: "창 이동 허용",
-  dragBlockedLabel: "창 이동 차단"
-});
-
-Object.assign(i18n.english, {
-  windowDrag: "Window dragging",
-  dragEnabled: "Allowed",
-  dragDisabled: "Blocked",
-  dragAllowedLabel: "Window dragging allowed",
-  dragBlockedLabel: "Window dragging blocked"
-});
 
 function renderDragControl(rule, translations) {
   const mode = rule.drag_mode === "enabled" ? "enabled" : "disabled";
@@ -64,7 +48,37 @@ return e.innerHTML}
 
 function applyTheme(){document.documentElement.dataset.theme=theme;$("#themeValue").textContent=i18n[language][theme==="light"?"themeLight":theme==="dark"?"themeDark":"themeSystem"];document.querySelectorAll("[data-theme]").forEach(e=>e.classList.toggle("is-selected",e.dataset.theme===theme))}
 
-function applyLanguage(){const t=i18n[language];document.documentElement.lang=language==="korean"?"ko":"en";document.querySelectorAll("[data-i18n]").forEach(e=>e.textContent=t[e.dataset.i18n]);document.querySelectorAll("[data-i18n-placeholder]").forEach(e=>e.placeholder=t[e.dataset.i18nPlaceholder]);$("#languageValue").textContent=language==="korean"?"한국어":"English";document.querySelectorAll("[data-language]").forEach(e=>e.classList.toggle("is-selected",e.dataset.language===language));applyTheme()}
+function renderLanguageMenu() {
+  const menu = $("#languageDropdown .dropdown-menu");
+  menu.innerHTML = "";
+
+  for (const [key, locale] of Object.entries(languages)) {
+    menu.innerHTML += `<button class="dropdown-item" data-language="${key}"><span lang="${locale.tag}">${locale.name}</span><img class="check-icon" src="figma/check.svg" alt=""></button>`;
+  }
+}
+
+function applyLanguage() {
+  const t = i18n[language];
+  document.documentElement.lang = languages[language].tag;
+  document.querySelectorAll("[data-i18n]").forEach(element => element.textContent = t[element.dataset.i18n]);
+  document.querySelectorAll("[data-i18n-placeholder]").forEach(element => element.placeholder = t[element.dataset.i18nPlaceholder]);
+  document.querySelectorAll("[data-i18n-label]").forEach(element => element.setAttribute("aria-label", t[element.dataset.i18nLabel]));
+  const updateButton = $("#btnCheckUpdate");
+
+  if (updateButton.disabled) updateButton.textContent = t.checking;
+
+  const preference = state.config.language;
+  $("#languageValue").textContent = languages[language].name;
+  document.querySelectorAll("[data-language]").forEach(element => {
+    const selected = element.dataset.language === preference;
+    element.classList.toggle("is-selected", selected);
+    element.setAttribute("aria-pressed", String(selected));
+  });
+
+  applyTheme();
+
+  if ($("#picker").classList.contains("is-open")) renderPicker();
+}
 
 function applicationIcon(icon){return icon?`<img class="app-icon" src="${icon}" alt="">`:'<span class="app-icon-placeholder"></span>'}
 
@@ -78,7 +92,7 @@ let toastTimer=null;
 
 function showToast(message,duration=3000){const toast=$("#toast");toast.textContent=message;toast.classList.add("is-visible");clearTimeout(toastTimer);toastTimer=setTimeout(()=>toast.classList.remove("is-visible"),duration)}
 
-function reportWindowError(error){showToast(`${language==="korean"?"창 적용·복구 실패":"Window apply/restore failed"}:\n${error}`,7000)}
+function reportWindowError(error){showToast(`${i18n[language].windowError}:\n${error}`,7000)}
 
 async function runConfigCommand(command,args){
   try{await invoke(command,args)}catch(error){reportWindowError(error)}finally{await refresh(true)}
@@ -88,7 +102,7 @@ async function checkForUpdates(){const button=$("#btnCheckUpdate"),t=i18n[langua
 
 if(button.disabled)return;button.disabled=true;button.textContent=t.checking;
 
-try{const result=await invoke("check_for_updates_manual");showToast(result==="LATEST"?t.latest:result==="BUSY"?t.installing:result,3000)}catch(error){showToast(`${t.updateFailed}:\n${error}`,3000)}finally{button.disabled=false;button.textContent=t.checkUpdate}}
+try{const result=await invoke("check_for_updates_manual");const current=i18n[language];showToast(result==="LATEST"?current.latest:result==="BUSY"?current.installing:result==="INSTALLED"?current.installed:result,3000)}catch(error){showToast(`${i18n[language].updateFailed}:\n${error}`,3000)}finally{button.disabled=false;button.textContent=i18n[language].checkUpdate}}
 
 const resetModal=$("#resetModal"),resetModalCard=resetModal.querySelector(".t-modal");
 
@@ -112,7 +126,7 @@ async function renderApplications() {
 
     const icon = state.applicationIcons?.[rule.id] || findLiveIcon(rule);
 
-    html += `<div class="app-row">${applicationIcon(icon)}<div class="app-copy"><strong>${esc(rule.display_name)}</strong>${renderDragControl(rule, t)}</div><button class="remove-btn" data-remove="${rule.id}"><img src="figma/remove-x.svg" alt="삭제"></button></div>`;
+    html += `<div class="app-row">${applicationIcon(icon)}<div class="app-copy"><strong>${esc(rule.display_name)}</strong>${renderDragControl(rule, t)}</div><button class="remove-btn" data-remove="${rule.id}" aria-label="${t.remove}"><img src="figma/remove-x.svg" alt=""></button></div>`;
   }
 
   if (rules.length) html += '<div class="divider"></div>';
@@ -166,7 +180,23 @@ return `<div class="picker-row">${applicationIcon(w.icon)}<div class="app-copy">
 
 async function openPicker(){try{windows=await invoke("list_windows");$("#pickerSearch").value="";renderPicker();$("#dim").classList.add("is-open");$("#picker").classList.add("is-open");$("#picker").setAttribute("aria-hidden","false");setTimeout(()=>{if($("#picker").classList.contains("is-open"))$("#pickerSearch").focus()},360)}catch(error){reportWindowError(error)}}
 
-function clearPickerDrag(){const picker=$("#picker");picker.classList.remove("is-dragging","is-drag-settling","is-drag-closing");picker.style.removeProperty("--picker-drag-y");picker.style.removeProperty("--picker-drag-scale");picker.style.transform=""}
+function clearPickerDrag(){
+  cancelAnimationFrame(pickerMotion.frame);
+  pickerMotion.frame=null;
+
+  if(pickerDrag.active){
+    const head=$(".picker-head");
+
+    if(head.hasPointerCapture(pickerDrag.pointerId))head.releasePointerCapture(pickerDrag.pointerId);
+  }
+
+  const picker=$("#picker"),dim=$("#dim");
+  pickerDrag.active=false;
+  picker.classList.remove("is-dragging");
+  picker.style.removeProperty("--picker-drag-y");
+  dim.classList.remove("is-dragging");
+  dim.style.opacity="";
+}
 
 function closePicker(){clearPickerDrag();$("#dim").classList.remove("is-open");$("#picker").classList.remove("is-open");$("#picker").setAttribute("aria-hidden","true")}
 
@@ -181,9 +211,11 @@ return null}).finally(()=>{refreshRequest=null});
 
 async function readState(){const first=!state,generation=visibilityGeneration,next=await invoke("get_state",{knownRevision:state?.revision});
 
-if(next.startupError&&next.startupError!==state?.startupError)reportWindowError(next.startupError);
+const newStartupError=next.startupError&&next.startupError!==state?.startupError;
 
 if(next.config){state=next;language=state.config.language;theme=state.config.theme||"system";applyLanguage();$("#automaticToggle").checked=state.config.automatic_application;$("#startupToggle").checked=state.startupEnabled;await renderApplications()}else if(state){state={...state,...next}}else{throw new Error("Initial settings are missing")}
+
+if(newStartupError)reportWindowError(next.startupError);
 
 if(generation===visibilityGeneration)setUiVisibility(next.uiVisible,false);
 
@@ -229,10 +261,17 @@ function toggleDropdown(wrap) {
   const open = !wrap.classList.contains("is-open");
 
   if (open) {
+    if (wrap.id === "languageDropdown" && !menu.children.length) {
+      renderLanguageMenu();
+      applyLanguage();
+    }
+
     const r = trigger.getBoundingClientRect(), appR = $(".app").getBoundingClientRect();
     const itemCount = menu.querySelectorAll(".dropdown-item").length;
-    const menuHeight = itemCount * 42 + 8, spaceBelow = innerHeight - r.bottom - 8;
-    const opensUp = spaceBelow < menuHeight && r.top > menuHeight;
+    const menuHeight = itemCount * 42 + 8, spaceBelow = innerHeight - r.bottom - 12;
+    const spaceAbove = r.top - 12;
+    const opensUp = spaceBelow < menuHeight && spaceAbove > spaceBelow;
+    menu.style.maxHeight = `${Math.max(0, opensUp ? spaceAbove : spaceBelow)}px`;
 
     menu.classList.toggle("opens-up", opensUp);
 
@@ -257,29 +296,108 @@ function toggleDropdown(wrap) {
 
 const pickerDrag={active:false,pointerId:null,startY:0,lastY:0,lastTime:0,velocity:0,dy:0};
 
-function beginPickerDrag(e){if(e.button!==0||e.target.closest("button")||!$("#picker").classList.contains("is-open"))return;pickerDrag.active=true;pickerDrag.pointerId=e.pointerId;pickerDrag.startY=pickerDrag.lastY=e.clientY;pickerDrag.lastTime=performance.now();pickerDrag.velocity=pickerDrag.dy=0;const picker=$("#picker");picker.classList.remove("is-drag-settling","is-drag-closing");picker.classList.add("is-dragging");e.currentTarget.setPointerCapture(e.pointerId)}
+const pickerMotion={frame:null,y:0,velocity:0};
 
-function movePickerDrag(e){if(!pickerDrag.active||e.pointerId!==pickerDrag.pointerId)return;e.preventDefault();const now=performance.now(),elapsed=Math.max(1,now-pickerDrag.lastTime),raw=e.clientY-pickerDrag.startY;pickerDrag.velocity=(e.clientY-pickerDrag.lastY)/elapsed;pickerDrag.lastY=e.clientY;pickerDrag.lastTime=now;pickerDrag.dy=raw;const upward=raw<0,dragY=upward?-Math.min(14,Math.pow(-raw,.65)):raw,scale=upward?1+Math.min(.008,-raw/15000):1;const picker=$("#picker");picker.style.setProperty("--picker-drag-y",`${dragY}px`);picker.style.setProperty("--picker-drag-scale",String(scale))}
+function paintPickerDrag(){
+  const picker=$("#picker"),distance=picker.offsetHeight+72;
+  picker.style.setProperty("--picker-drag-y",`${pickerMotion.y}px`);
+  $("#dim").style.opacity=String(Math.max(0,Math.min(1,1-pickerMotion.y/distance)));
+}
 
-function endPickerDrag(e){if(!pickerDrag.active||e.pointerId!==pickerDrag.pointerId)return;pickerDrag.active=false;const picker=$("#picker"),shouldClose=pickerDrag.dy>96||(pickerDrag.dy>36&&pickerDrag.velocity>.55),currentTransform=getComputedStyle(picker).transform;
+function beginPickerDrag(e){
+  const picker=$("#picker");
 
-try{e.currentTarget.releasePointerCapture(e.pointerId)}catch{}
+  if(e.button!==0||pickerDrag.active||e.target.closest("button")||!picker.classList.contains("is-open"))return;
 
-if(matchMedia("(prefers-reduced-motion: reduce)").matches){if(shouldClose)closePicker();else clearPickerDrag();
+  pickerMotion.y=new DOMMatrixReadOnly(getComputedStyle(picker).transform).m42;
+  pickerMotion.velocity=0;
+  cancelAnimationFrame(pickerMotion.frame);
+  pickerMotion.frame=null;
+  // Recover the input offset from the resisted position when catching a return.
+  const offset=pickerMotion.y<0?-Math.pow(-pickerMotion.y,1/.65):pickerMotion.y;
+  pickerDrag.active=true;
+  pickerDrag.pointerId=e.pointerId;
+  pickerDrag.startY=e.clientY-offset;
+  pickerDrag.lastY=e.clientY;
+  pickerDrag.lastTime=performance.now();
+  pickerDrag.velocity=0;
+  pickerDrag.dy=offset;
+  picker.classList.add("is-dragging");
+  $("#dim").classList.add("is-open","is-dragging");
+  paintPickerDrag();
+  e.currentTarget.setPointerCapture(e.pointerId);
+}
 
-return}
+function movePickerDrag(e){
+  if(!pickerDrag.active||e.pointerId!==pickerDrag.pointerId)return;
 
-picker.style.transform=currentTransform;picker.classList.remove("is-dragging");picker.classList.add(shouldClose?"is-drag-closing":"is-drag-settling");picker.style.removeProperty("--picker-drag-y");picker.style.removeProperty("--picker-drag-scale");void picker.offsetHeight;picker.style.transform="";
+  e.preventDefault();
+  const now=performance.now(),elapsed=Math.max(1,now-pickerDrag.lastTime),raw=e.clientY-pickerDrag.startY;
+  const y=raw<0?-Math.min(14,Math.pow(-raw,.65)):raw;
+  pickerMotion.velocity=(y-pickerMotion.y)/elapsed*1000;
+  pickerMotion.y=y;
+  pickerDrag.velocity=(e.clientY-pickerDrag.lastY)/elapsed;
+  pickerDrag.lastY=e.clientY;
+  pickerDrag.lastTime=now;
+  pickerDrag.dy=raw;
+  paintPickerDrag();
+}
 
-if(shouldClose)$("#dim").classList.remove("is-open");let finished=false;
+function settlePickerDrag(shouldClose){
+  const reduced=matchMedia("(prefers-reduced-motion: reduce)");
 
-const finish=event=>{if(event&&event.target!==picker||event&&event.propertyName!=="transform"||finished)return;finished=true;clearTimeout(fallback);picker.removeEventListener("transitionend",finish);
+  if(reduced.matches){
+    if(shouldClose)closePicker();else clearPickerDrag();
 
-if(shouldClose){picker.classList.remove("is-open");picker.setAttribute("aria-hidden","true")}
+    return;
+  }
 
-picker.classList.remove("is-drag-settling","is-drag-closing")};
+  const picker=$("#picker"),target=shouldClose?picker.offsetHeight+72:0;
+  const duration=parseFloat(getComputedStyle(document.documentElement).getPropertyValue(shouldClose?"--duration-fast":"--duration-release"));
+  const frequency=8/(duration/1000);
+  let lastTime=performance.now();
 
-picker.addEventListener("transitionend",finish);const fallback=setTimeout(()=>finish(),shouldClose?300:430)}
+  const advance=now=>{
+    if(reduced.matches){
+      if(shouldClose)closePicker();else clearPickerDrag();
+
+      return;
+    }
+
+    const elapsed=Math.max(0,(now-lastTime)/1000),offset=pickerMotion.y-target;
+    const coefficient=pickerMotion.velocity+frequency*offset,decay=Math.exp(-frequency*elapsed);
+    // A critically damped return preserves release velocity without oscillation.
+    pickerMotion.y=target+(offset+coefficient*elapsed)*decay;
+    pickerMotion.velocity=(pickerMotion.velocity-frequency*coefficient*elapsed)*decay;
+    lastTime=now;
+    paintPickerDrag();
+
+    if(Math.abs(pickerMotion.y-target)<.5&&Math.abs(pickerMotion.velocity)<5){
+      if(shouldClose)closePicker();else clearPickerDrag();
+
+      return;
+    }
+
+    pickerMotion.frame=requestAnimationFrame(advance);
+  };
+
+  pickerMotion.frame=requestAnimationFrame(advance);
+}
+
+function endPickerDrag(e){
+  if(!pickerDrag.active||e.pointerId!==pickerDrag.pointerId)return;
+
+  pickerDrag.active=false;
+  // A held pointer has no remaining throw velocity; cancellation always returns.
+
+  if(e.type==="pointercancel"||performance.now()-pickerDrag.lastTime>80){pickerDrag.velocity=0;pickerMotion.velocity=0}
+
+  const shouldClose=e.type!=="pointercancel"&&(pickerDrag.dy>96||(pickerDrag.dy>36&&pickerDrag.velocity>.55));
+
+  if(e.currentTarget.hasPointerCapture(e.pointerId))e.currentTarget.releasePointerCapture(e.pointerId);
+
+  settlePickerDrag(shouldClose);
+}
 
 $("#pickerClose").onclick=closePicker;
 
@@ -315,9 +433,15 @@ pickerHead.addEventListener("pointercancel",endPickerDrag);
 
 document.querySelectorAll(".dropdown-trigger").forEach(button=>button.onclick=e=>{e.stopPropagation();toggleDropdown(button.closest(".dropdown-wrap"))});
 
-document.querySelectorAll("[data-language]").forEach(item=>item.onclick=e=>{e.stopPropagation();closeMenus();
+$("#languageDropdown .dropdown-menu").addEventListener("click", event => {
+  const item = event.target.closest("[data-language]");
 
-return runConfigCommand("set_language",{language:item.dataset.language})});
+  if (!item) return;
+
+  event.stopPropagation();
+  closeMenus();
+  runConfigCommand("set_language", { language: item.dataset.language });
+});
 
 document.querySelectorAll("[data-theme]").forEach(item=>item.onclick=e=>{e.stopPropagation();closeMenus();
 
@@ -340,16 +464,30 @@ function prepareContentReveal() {
 }
 
 async function revealContent() {
+  const stack = $(".content-stack");
+
+  // A prepared window can be used immediately when shown again.
+  if (stack.classList.contains("is-shown")) {
+    contentRevealGeneration += 1;
+    cancelContentReveal?.();
+    cancelContentReveal = null;
+    stack.classList.remove("is-preparing");
+    stack.classList.add("is-settled");
+    stack.inert = false;
+
+    return;
+  }
+
   prepareContentReveal();
 
   const generation = contentRevealGeneration;
-  const stack = $(".content-stack");
+  const fontFamily = getComputedStyle(document.body).fontFamily;
 
   // Hidden sections must use their final font metrics before entering.
   await Promise.allSettled([
-    document.fonts.load("400 17px Pretendard"),
-    document.fonts.load("500 17px Pretendard"),
-    document.fonts.load("600 17px Pretendard")
+    document.fonts.load(`400 17px ${fontFamily}`),
+    document.fonts.load(`500 17px ${fontFamily}`),
+    document.fonts.load(`600 17px ${fontFamily}`)
   ]);
   await document.fonts.ready;
 
@@ -397,7 +535,11 @@ async function revealContent() {
 
 // Keep content ready while the native window is hidden; Explorer can reopen
 // the existing instance without emitting bald-window-reopened.
-window.addEventListener("bald-window-reopened",()=>{elevationRequested=false;elevationRetry=true;refresh().then(result=>{if(result)return revealContent()}).catch(reportWindowError)});
+window.addEventListener("bald-window-reopened",()=>{elevationRequested=false;elevationRetry=true;
+
+if(state)revealContent().catch(reportWindowError);
+
+refresh().catch(reportWindowError)});
 
 function updateHeaderScroll(){
   $(".header").classList.toggle("is-scrolled", $(".main").scrollTop > 0);
