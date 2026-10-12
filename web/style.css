@@ -40,6 +40,8 @@
 .dropdown-menu{display:block;position:fixed;z-index:500;min-width:160px;width:max-content;padding:3px;border:0;border-radius:var(--menu-radius);background:rgba(36,36,36,.40);backdrop-filter:blur(24px);-webkit-backdrop-filter:blur(24px);box-shadow:0 8px 32px rgba(0,0,0,.40),inset 0 0 0 1px rgba(255,255,255,.10);opacity:0;visibility:visible;pointer-events:none;transform:scale(.96) translateY(-6px);transform-origin:top right;transition:opacity var(--duration-quick) var(--ease-smooth-out),transform var(--duration-fast) var(--ease-smooth-out)}
 .dropdown-menu.opens-up{transform:scale(.96) translateY(6px);transform-origin:bottom right}
 .dropdown-menu.opens-up.is-open,.dropdown-menu.is-open{opacity:1;transform:scale(1) translateY(0);pointer-events:auto}
+/* Keep theme glyphs on one raster layer through the end of the scale transition. */
+#themeDropdown .dropdown-menu{will-change:transform}
 :root[data-theme=light] .dropdown-menu{background:rgba(255,255,255,.40);box-shadow:0 8px 32px rgba(0,0,0,.12),inset 0 0 0 1px rgba(0,0,0,.08)}
 .dropdown-item{display:flex;align-items:center;justify-content:space-between;height:auto;padding:10px;font-size:15px;font-weight:300;color:var(--text);cursor:pointer;transition:background .10s;border-radius:13px;letter-spacing:normal}
 .dropdown-item:hover:enabled{background:rgba(255,255,255,.06)}

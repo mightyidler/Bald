@@ -267,9 +267,14 @@ function toggleDropdown(wrap) {
     }
 
     const r = trigger.getBoundingClientRect(), appR = $(".app").getBoundingClientRect();
+    const pagePadding = parseFloat(getComputedStyle($(".main")).paddingLeft);
+    const minTop = $(".header").getBoundingClientRect().bottom + pagePadding;
+    const maxBottom = appR.bottom - pagePadding;
+    const belowTop = Math.max(r.bottom, minTop) + 8;
+    const aboveBottom = Math.min(r.top, maxBottom) - 8;
     const itemCount = menu.querySelectorAll(".dropdown-item").length;
-    const menuHeight = itemCount * 42 + 8, spaceBelow = innerHeight - r.bottom - 12;
-    const spaceAbove = r.top - 12;
+    const menuHeight = itemCount * 42 + 8, spaceBelow = maxBottom - belowTop;
+    const spaceAbove = aboveBottom - minTop;
     const opensUp = spaceBelow < menuHeight && spaceAbove > spaceBelow;
     menu.style.maxHeight = `${Math.max(0, opensUp ? spaceAbove : spaceBelow)}px`;
 
@@ -283,8 +288,8 @@ function toggleDropdown(wrap) {
       menu.style.right = `${innerWidth - appR.right + 20}px`;
     }
 
-    menu.style.top = opensUp ? "auto" : `${r.bottom + 8}px`;
-    menu.style.bottom = opensUp ? `${innerHeight - r.top + 8}px` : "auto";
+    menu.style.top = opensUp ? "auto" : `${belowTop}px`;
+    menu.style.bottom = opensUp ? `${innerHeight - aboveBottom}px` : "auto";
   }
 
   wrap.classList.toggle("is-open", open);
@@ -483,11 +488,14 @@ async function revealContent() {
   const generation = contentRevealGeneration;
   const fontFamily = getComputedStyle(document.body).fontFamily;
 
-  // Hidden sections must use their final font metrics before entering.
+  // Prepare lazy menu fonts too, so their first opening cannot swap glyph metrics.
   await Promise.allSettled([
     document.fonts.load(`400 17px ${fontFamily}`),
     document.fonts.load(`500 17px ${fontFamily}`),
-    document.fonts.load(`600 17px ${fontFamily}`)
+    document.fonts.load(`600 17px ${fontFamily}`),
+    document.fonts.load('300 15px "Pretendard Variable"', "한국어"),
+    document.fonts.load('300 15px "Pretendard JP Variable"', "日本語"),
+    document.fonts.load('300 15px "Pretendard Std Variable"', "English Русский")
   ]);
   await document.fonts.ready;
 
@@ -556,6 +564,8 @@ updatePickerScroll();
 $("#pickerList").addEventListener("scroll", updatePickerScroll, { passive: true });
 
 $("#overlay").addEventListener("click",closeMenus);
+
+window.addEventListener("resize",closeMenus);
 
 $(".main").addEventListener("scroll",()=>{updateHeaderScroll();
 

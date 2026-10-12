@@ -6,7 +6,7 @@ const test = require('node:test');
 const source = fs.readFileSync('web/app.js', 'utf8');
 const reveal = source.slice(source.indexOf('let contentRevealGeneration ='), source.indexOf('// Keep content ready'));
 
-function fixture(reduced = false) {
+function fixture(reduced = false, menuFontReady = Promise.resolve()) {
   const classes = new Set();
   const listeners = new Map(), timers = new Map(), frames = [];
   const last = {};
@@ -22,10 +22,14 @@ function fixture(reduced = false) {
   };
   let resolveFonts, nextTimer = 0;
   const ready = new Promise(resolve => { resolveFonts = resolve; });
-  const loads = [];
+  const loads = [], samples = [];
   const context = vm.createContext({
     $: () => stack,
-    document: { body: {}, fonts: { ready, load: font => { loads.push(font); return Promise.resolve(); } } },
+    document: { body: {}, fonts: { ready, load: (font, text) => {
+      loads.push(font);
+      samples.push(text);
+      return text ? menuFontReady : Promise.resolve();
+    } } },
     getComputedStyle: () => ({ fontFamily: '"Pretendard JP Variable", sans-serif',
       getPropertyValue: name => name === '--stagger-dur' ? '400ms' : '40ms' }),
     matchMedia: () => ({ matches: reduced }),
@@ -34,7 +38,7 @@ function fixture(reduced = false) {
     clearTimeout: id => timers.delete(id)
   });
   vm.runInContext(reveal, context);
-  return { context, stack, classes, listeners, timers, frames, loads, resolveFonts,
+  return { context, stack, classes, listeners, timers, frames, loads, samples, resolveFonts,
     flushFrames: () => { while (frames.length) frames.shift()(); } };
 }
 
@@ -46,7 +50,7 @@ test('entrance waits for final font metrics and keeps all content inert until th
   assert.equal(ui.frames.length, 0);
   ui.resolveFonts();
   await pending;
-  assert.ok(ui.loads.every(font => font.includes('Pretendard JP Variable')));
+  assert.ok(ui.loads.slice(0, 3).every(font => font.includes('Pretendard JP Variable')));
   ui.flushFrames();
   assert.equal(ui.classes.has('is-shown'), true);
   assert.equal(ui.classes.has('is-settled'), false);
@@ -111,4 +115,23 @@ test('reduced motion reveals the final layout without timers or animation frames
   assert.equal(ui.stack.inert, false);
   assert.equal(ui.timers.size, 0);
   assert.equal(ui.frames.length, 0);
+});
+
+test('the first menu cannot be used until its Japanese and other bundled fonts finish loading', async () => {
+  let resolveMenuFonts;
+  const menuFontReady = new Promise(resolve => { resolveMenuFonts = resolve; });
+  const ui = fixture(true, menuFontReady);
+  const pending = ui.context.revealContent();
+  ui.resolveFonts();
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(ui.stack.inert, true);
+  assert.equal(ui.classes.has('is-shown'), false);
+  for (const family of ['Pretendard Variable', 'Pretendard JP Variable', 'Pretendard Std Variable']) {
+    assert.ok(ui.loads.includes(`300 15px "${family}"`));
+  }
+  assert.ok(ui.samples.includes('日本語'));
+  resolveMenuFonts();
+  await pending;
+  assert.equal(ui.stack.inert, false);
+  assert.equal(ui.classes.has('is-settled'), true);
 });
