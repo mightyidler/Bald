@@ -1,0 +1,2 @@
+# Preserve the recorded upstream license bytes on every checkout.
+web/fonts/OFL.txt -text whitespace=-blank-at-eol
